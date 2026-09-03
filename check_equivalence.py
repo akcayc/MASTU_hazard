@@ -10,8 +10,14 @@ pipeline is the gate. If it fails, the retrofit is wrong and not the original.
 import argparse
 import numpy as np
 
-from saddle_data import load_omaha_slow, AmplitudeSelector
-from saddle_extras import amplitude_with_coherence
+import giopath  # noqa: F401  -- puts Giovannozzi's modules on sys.path
+
+try:
+    from saddle_data import load_omaha_slow, AmplitudeSelector
+    from saddle_extras import amplitude_with_coherence
+except ImportError:
+    giopath.report()
+    raise
 
 
 def main():

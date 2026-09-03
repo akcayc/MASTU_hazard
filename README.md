@@ -26,6 +26,7 @@ recomputation over the database.
 | `saddle_extras.py` | Additions. `amplitude_with_coherence`, `noise_floor`, `analyze_shot`, `NTOR_BOTH_SIGNS` |
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
+| `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
 | `tests/` | Offline test suite; runs without Freya |
 | `docs/` | Design document and audit |
@@ -56,7 +57,35 @@ python run_master.py --shots 47000 47001 47002 --build-detector \
     --coherence-min 0.6 --out-csv rm_ladder_47000.csv
 ```
 
-`GIOMAST_PATH` overrides the hard-coded Freya path to Giovannozzi's modules.
+### Finding Giovannozzi's modules
+
+`saddle_data`, `mode_functions`, `omaha_coils`, `saddle_geometry`,
+`pickup_coil_data` and `sxr_geometry` are not in this repository — they live on
+Freya. Every entry point imports `giopath` first, which searches, in order:
+
+1. `$GIOMAST_PATH` — colon-separated like `$PATH`, overrides everything
+2. `/home/cm0459/Python/gioMAST` — the usual location on Freya
+3. `<repo>/egio` — the vendored copy, `saddle_data.py` only
+
+Directories are *appended* to `sys.path`, so `tests/stubs` can still shadow them
+when running offline. If anything is missing you get a diagnostic naming the
+modules and the directories searched, ahead of the traceback:
+
+```
+Giovannozzi module search:
+  [no such ] /home/cm0459/Python/gioMAST
+  [found   ] /home/akcay/Python/MASTU_hazard/egio
+
+  MISSING: mode_functions, omaha_coils, saddle_geometry, ...
+```
+
+If Gio's directory moves, either set the environment variable
+
+```bash
+export GIOMAST_PATH=/path/to/gioMAST
+```
+
+or edit `FREYA_DEFAULT` in `giopath.py` — one place, not four.
 
 The ladder CSV has columns `shot, isok_rm, whichn, ta_rm, tb_rm, ip_mean,
 ft_nrmse, floor, rm2.0000 … rm30.0000`, one row per shot, each `rm*` column

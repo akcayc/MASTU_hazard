@@ -29,19 +29,20 @@ anything physically:
 
 import argparse
 import json
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 
-# Gio's analysis modules (Freya).  Override with GIOMAST_PATH.
-sys.path.insert(0, os.environ.get("GIOMAST_PATH", "/home/cm0459/Python/gioMAST"))
+import giopath  # noqa: F401  -- puts Giovannozzi's modules on sys.path
 
-import pyuda
+try:
+    import pyuda
 
-from saddle_extras import analyze_shot, noise_floor
-from flattop import find_flattop, FlatTopConfig
+    from saddle_extras import analyze_shot, noise_floor
+    from flattop import find_flattop, FlatTopConfig
+except ImportError:
+    giopath.report()
+    raise
 
 
 # ---------------------------------------------------------------------------

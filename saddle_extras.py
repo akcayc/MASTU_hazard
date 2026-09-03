@@ -64,6 +64,8 @@ coherence.
 
 import numpy as np
 
+import giopath  # noqa: F401  -- puts Giovannozzi's modules on sys.path
+
 from saddle_data import AmplitudeSelector, load_omaha_slow
 from mode_functions import zeros_spectrum
 
