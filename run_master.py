@@ -206,7 +206,10 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008):
     """First crossing time of the n=`n_detect` trace, for every ladder level."""
     tr = sig["traces"].get(int(n_detect))
     if tr is None:
-        return {f"rm{lv:.4f}": np.nan for lv in ladder}
+        # Returning NaN here would write a CSV full of nan with no explanation.
+        raise ValueError(
+            f"no trace for n={n_detect} on shot {sig.get('shot')}; "
+            f"available: {sorted(sig['traces'])}")
     return {f"rm{lv:.4f}": schmitt_first_crossing(tr["time"], tr["snr"], lv, debounce)
             for lv in ladder}
 
@@ -216,6 +219,18 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       coherence_min=0.0, ft_cfg=None):
     """Run the detector over `shots` and return the ladder table."""
     ladder = DEFAULT_LADDER if ladder is None else np.asarray(ladder)
+
+    # The ladder triggers on one n, which must be among those analysed --
+    # otherwise every row comes back NaN and the cause is invisible.  Check
+    # before touching the database, not per shot.
+    ntor = [n for n in (ntor_list or NTOR_DEFAULT) if n != 0]
+    if int(n_detect) not in [int(n) for n in ntor]:
+        raise ValueError(
+            f"--n-detect {n_detect} is not in --n-tor {sorted(int(n) for n in ntor)}. "
+            f"The ladder triggers on one toroidal mode number, which must be one "
+            f"of those analysed. Add {n_detect} to --n-tor, or pick a different "
+            f"--n-detect.")
+
     rows, dropped = [], {}
 
     for shot in shots:

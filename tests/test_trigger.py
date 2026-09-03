@@ -38,8 +38,29 @@ def main():
     # a run shorter than the debounce must not fire
     brief = np.zeros_like(t); brief[400:405] = 10.0
     check("5 ms run vs 8 ms debounce", brief, 5.0, np.nan)
+
+    ok &= (test_n_detect_guard() == 0)
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_n_detect_guard():
+    """--n-detect outside --n-tor must fail loudly, not return NaN."""
+    from run_master import build_rm_detector, detect_ladder
+    ok = True
+    try:
+        build_rm_detector(shots=[47000], client=None, ntor_list=[1, 2], n_detect=3)
+        print("  FAIL  build_rm_detector accepted n_detect outside ntor")
+        ok = False
+    except ValueError as e:
+        print(f"  PASS  build_rm_detector rejects it: {str(e)[:58]}...")
+    try:
+        detect_ladder({"shot": 1, "traces": {1: None}}, [2.0], n_detect=9)
+        print("  FAIL  detect_ladder returned instead of raising")
+        ok = False
+    except ValueError as e:
+        print(f"  PASS  detect_ladder rejects it: {str(e)[:64]}...")
+    return 0 if ok else 1
