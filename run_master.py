@@ -38,6 +38,7 @@ import giopath  # noqa: F401  -- puts Giovannozzi's modules on sys.path
 try:
     import pyuda
 
+    from saddle_analysis import NTOR_DEFAULT
     from saddle_extras import analyze_shot, noise_floor
     from flattop import find_flattop, FlatTopConfig
 except ImportError:
@@ -83,7 +84,7 @@ def schmitt_first_crossing(time, signal, level, debounce=0.008):
     return np.nan
 
 
-def collect_signals(shot, client, t_start=0.2, n_tor_max=4, NFFT=512,
+def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
                     ft_cfg=None, coherence_min=0.0, want_profiles=False):
     """Fetch everything one shot contributes, on that shot's flat-top window.
 
@@ -112,8 +113,9 @@ def collect_signals(shot, client, t_start=0.2, n_tor_max=4, NFFT=512,
                ft_slope=ft.slope, ft_nrmse=ft.nrmse)
 
     # --- OMAHA mode analysis --------------------------------------------
-    # ntor starts at 1: n=0 is axisymmetric and carries no mode information.
-    ntor = np.arange(1, n_tor_max + 1)
+    # both signs: n_detection projects onto exp(+i n phi), so a positive-only
+    # list sees one rotation direction only.  n=0 is axisymmetric, so excluded.
+    ntor = np.array([n for n in (ntor_list or NTOR_DEFAULT) if n != 0])
     try:
         modes, meta = analyze_shot(shot, NFFT=NFFT, ntor=ntor)
     except Exception as e:
@@ -187,7 +189,7 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008):
             for lv in ladder}
 
 
-def build_rm_detector(shots, client, ladder=None, n_tor_max=4, NFFT=512,
+def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       t_start=0.2, n_detect=1, debounce=0.008,
                       coherence_min=0.0, ft_cfg=None):
     """Run the detector over `shots` and return the ladder table."""
@@ -195,7 +197,7 @@ def build_rm_detector(shots, client, ladder=None, n_tor_max=4, NFFT=512,
     rows, dropped = [], {}
 
     for shot in shots:
-        sig = collect_signals(shot, client, t_start=t_start, n_tor_max=n_tor_max,
+        sig = collect_signals(shot, client, t_start=t_start, ntor_list=ntor_list,
                               NFFT=NFFT, ft_cfg=ft_cfg, coherence_min=coherence_min)
         if not sig["ok"]:
             dropped[shot] = sig["reason"]
@@ -213,7 +215,7 @@ def build_rm_detector(shots, client, ladder=None, n_tor_max=4, NFFT=512,
     return {"table": df, "dropped": dropped, "ladder": ladder}
 
 
-def run_master(shots, build_detector=False, thresholds=None, n_tor_max=4,
+def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                NFFT=512, t_start=0.2, out_csv=None, coherence_min=0.0,
                debounce=0.008, n_detect=1):
     client = pyuda.Client()
@@ -224,7 +226,7 @@ def run_master(shots, build_detector=False, thresholds=None, n_tor_max=4,
         if thresholds and "ladder" in thresholds:
             ladder = np.asarray(thresholds["ladder"], float)
         det = build_rm_detector(shots=shots, client=client, ladder=ladder,
-                                n_tor_max=n_tor_max, NFFT=NFFT, t_start=t_start,
+                                ntor_list=ntor_list, NFFT=NFFT, t_start=t_start,
                                 n_detect=n_detect, debounce=debounce,
                                 coherence_min=coherence_min)
         outputs["detector"] = det
@@ -243,7 +245,8 @@ def main():
     parser.add_argument("--build-detector", action="store_true")
 
     parser.add_argument("--nfft", type=int, default=512)
-    parser.add_argument("--n-tor-max", type=int, default=4)
+    parser.add_argument("--n-tor", type=int, nargs="+", default=NTOR_DEFAULT,
+                        help="toroidal mode numbers to search; both signs")
     parser.add_argument("--n-detect", type=int, default=1,
                         help="toroidal mode number the ladder triggers on")
     parser.add_argument("--t-start", type=float, default=0.2)
@@ -269,7 +272,7 @@ def main():
         shots=args.shots,
         build_detector=args.build_detector,
         thresholds=thresholds,
-        n_tor_max=args.n_tor_max,
+        ntor_list=args.n_tor,
         NFFT=args.nfft,
         t_start=args.t_start,
         out_csv=args.out_csv,

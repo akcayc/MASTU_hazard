@@ -24,7 +24,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--shot", type=int, default=47000)
     p.add_argument("--nfft", type=int, default=512)
-    p.add_argument("--n-tor", type=int, nargs="+", default=[1, 2, 3, 4])
+    from saddle_analysis import NTOR_DEFAULT
+    p.add_argument("--n-tor", type=int, nargs="+", default=NTOR_DEFAULT)
     a = p.parse_args()
 
     ntor = np.array(a.n_tor)

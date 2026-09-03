@@ -43,7 +43,11 @@ import pyuda
 
 # defaults, formerly module-level globals read from inside the function
 NFFT_DEFAULT = 512
-NTOR_DEFAULT = [1, 2, 3, 4]
+# Both signs.  Spectra.n_detection projects onto exp(+i n phi), so a
+# positive-only list sees one toroidal rotation direction only; Giovannozzi's
+# own instructions specify "a list of toroidal mode number (positive and
+# negative)".
+NTOR_DEFAULT = [-4, -3, -2, -1, 1, 2, 3, 4]
 TIME_INTERVAL_DEFAULT = np.array([0.0, 2.0])
 FMIN_DEFAULT = 1.0e2
 FMAX_DEFAULT = 50.0e3

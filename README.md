@@ -26,7 +26,6 @@ recomputation over the database.
 | `saddle_extras.py` | Additions. `amplitude_with_coherence`, `noise_floor`, `analyze_shot`, `NTOR_BOTH_SIGNS` |
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
-| `compare_arrays.py` | Reports coverage and n-conditioning for all five magnetics sources |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
 | `tests/` | Offline test suite; runs without Freya |
@@ -115,31 +114,28 @@ run_master.main()
 
 ## Two things that are not yet right
 
-**Absolute calibration is missing.** `RecognizedModes.amplitude` carries a
-`# TODO check`, and it is load-bearing. `matplotlib.mlab.specgram(mode='complex')`
-applies no window-power or sample-rate normalisation, and no coil area or
-amplifier gain is divided out. The DIII-D counterpart carries an explicit
-normalisation, a `Ts` factor, and a `×1e4` that lands the result in Gauss. Until
-this is settled the ladder can only be expressed in units of each shot's own
-pre-plasma noise floor, and thresholds cannot be compared with any published
-number.
+**The amplitude scale is relative, not absolute.** Giovannozzi labels
+`damplitude_dt` as T/s and `amplitude` as T, but qualifies it: *"I'm saying T
+and T/s but, really, I'm not sure that the data I'm reading are in absolute
+units, so use it for comparing shots."* So the scale is consistent and
+shot-to-shot comparison is valid — which is all a threshold ladder needs — but
+a threshold cannot be quoted as a field or compared against DIII-D. `specgram`
+also applies no window-power or sample-rate normalisation, so an O(1) factor is
+unaccounted for on top.
 
-**The array may be the wrong one.** `saddle_analysis.py` calls
-`load_omaha_slow`, but `saddle_data` offers five sources and `model_saddle.py`'s
-selector feeds all five to the same `spectrum() -> n_detection()` chain:
-`load()` (all saddles), `load().block_a()`, `load().block_b()`,
-`load_omaha_slow()`, `load_omaha_fast()`. On shot 47000 the OMAHA radial subset
-is 5 coils spanning 59.8 deg, on which the projections for n=1..4 are 93%
-parallel — one coherent signal necessarily lights up n=1,2,3 almost equally,
-and the mode number is not measurable. Run `compare_arrays.py` and choose.
+A consequence worth deciding deliberately: because cross-shot comparison *is*
+valid, the per-shot noise-floor normalisation is a choice rather than a
+necessity. If the instrument gain is stable between shots, dividing by each
+shot's own floor removes real variation. Both are stored (`amp` and
+`noise_floor`), so the ladder can be run either way.
 
-**Toroidal handedness is undetermined.** `Spectra.n_detection` projects onto
-`exp(+i n phi)`, so it detects modes whose spectral phase runs as `exp(-i n phi)`.
-A mode of the opposite sense is invisible to a positive-only search list — and,
-worse, inflates the *ungated* amplitude of every n at once. Search both signs
-(`saddle_extras.NTOR_BOTH_SIGNS`) until the convention is confirmed against a
-shot with a known mode. DIII-D handles this explicitly by branching on
-`sign(<Bt><Ip>)`; there is no such branch here yet. See `docs/` §9.6.
+**Toroidal handedness.** `Spectra.n_detection` projects onto `exp(+i n phi)`,
+so it detects modes whose spectral phase runs as `exp(-i n phi)`. A mode of the
+opposite sense is invisible to a positive-only search list — and, worse,
+inflates the *ungated* amplitude of every n at once. `NTOR_DEFAULT` therefore
+carries both signs, matching Giovannozzi's instruction that `n_detection` takes
+*"a list of toroidal mode number (positive and negative)"*. Which half carries
+the coherence tells you the sense of rotation. See `docs/` §9.6.
 
 ## Not yet written
 

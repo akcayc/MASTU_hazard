@@ -57,9 +57,10 @@ Which handedness a real mode has depends on the toroidal rotation direction,
 and therefore on the sign of Ip and Bt.  DIII-D handles this explicitly: its
 locked-mode detector branches on sign(<Bt><Ip>) to pick MmatrixRH or
 MmatrixLH.  The MAST-U path has no such branch and ntor=[1,2,3,4] is one-sided.
-Until the convention has been checked against a shot with a known mode, search
-both signs -- see NTOR_BOTH_SIGNS -- and confirm which half carries the
-coherence.
+This is why NTOR_DEFAULT carries both signs, matching Giovannozzi's own
+instruction that n_detection takes "a list of toroidal mode number (positive
+and negative)".  Which half carries the coherence tells you the sense of
+rotation.
 """
 
 import numpy as np
@@ -74,9 +75,6 @@ from saddle_analysis import (
     FMIN_DEFAULT, FMAX_DEFAULT, VMIN_DEFAULT, LM_FREQ_HZ,
 )
 
-
-# Search list covering both toroidal handednesses.  See the module docstring.
-NTOR_BOTH_SIGNS = [-4, -3, -2, -1, 1, 2, 3, 4]
 
 # Coherence gate.  The theoretical pure-noise floor is 1/N_c, but the measured
 # floor in the offline test sat near 2/N_c, so set the gate from the measured
@@ -162,11 +160,22 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
         meta     = {shot, NFFT, ntor, n_coils, phi, fs_hz, freq_band, v_min}
 
     On naming, inherited from saddle_data.ModeAmplitude:
-        damp_dt = sqrt(sum of masked power)  -- raw dB/dt spectral amplitude
-        amp     = damp_dt / (2*pi*freq)      -- time-integrated, i.e. B
-    Neither is in physical units: matplotlib.mlab.specgram(mode='complex')
-    applies no window-power or sample-rate normalisation, and no coil area or
-    amplifier gain has been divided out.
+        damp_dt = sqrt(sum of masked power)  -- dB/dt spectral amplitude, T/s
+        amp     = damp_dt / (2*pi*freq)      -- time-integrated, T
+
+    UNITS.  Giovannozzi labels these T/s and T, but adds: "I'm saying T and
+    T/s but, really, I'm not sure that the data I'm reading are in absolute
+    units, so use it for comparing shots."  So treat them as a consistent
+    relative scale -- valid for ranking and for shot-to-shot comparison, not
+    for quoting an absolute field.  That is enough for a threshold ladder,
+    which only ever needs shots to be comparable with each other; it is not
+    enough to quote a threshold in Gauss or to compare against DIII-D.
+
+    It also means the per-shot noise-floor normalisation in run_master is a
+    choice, not a necessity: if the instrument gain is stable between shots,
+    dividing by each shot's own floor removes real cross-shot variation.  Both
+    numbers are stored -- 'amp' raw and 'noise_floor' -- so the ladder can be
+    run either way.
     """
     per_n = {} if out is None else out
     ntor = list(NTOR_DEFAULT if ntor is None else np.atleast_1d(ntor))
