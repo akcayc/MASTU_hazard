@@ -26,6 +26,7 @@ recomputation over the database.
 | `saddle_extras.py` | Additions. `amplitude_with_coherence`, `noise_floor`, `analyze_shot`, `NTOR_BOTH_SIGNS` |
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
+| `compare_arrays.py` | Reports coverage and n-conditioning for all five magnetics sources |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
 | `tests/` | Offline test suite; runs without Freya |
@@ -122,6 +123,15 @@ normalisation, a `Ts` factor, and a `×1e4` that lands the result in Gauss. Unti
 this is settled the ladder can only be expressed in units of each shot's own
 pre-plasma noise floor, and thresholds cannot be compared with any published
 number.
+
+**The array may be the wrong one.** `saddle_analysis.py` calls
+`load_omaha_slow`, but `saddle_data` offers five sources and `model_saddle.py`'s
+selector feeds all five to the same `spectrum() -> n_detection()` chain:
+`load()` (all saddles), `load().block_a()`, `load().block_b()`,
+`load_omaha_slow()`, `load_omaha_fast()`. On shot 47000 the OMAHA radial subset
+is 5 coils spanning 59.8 deg, on which the projections for n=1..4 are 93%
+parallel — one coherent signal necessarily lights up n=1,2,3 almost equally,
+and the mode number is not measurable. Run `compare_arrays.py` and choose.
 
 **Toroidal handedness is undetermined.** `Spectra.n_detection` projects onto
 `exp(+i n phi)`, so it detects modes whose spectral phase runs as `exp(-i n phi)`.
