@@ -109,8 +109,8 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
         out["reason"] = f"flat-top: {ft.reason}"
         return out
     t_a, t_b = ft.t_a, ft.t_b
-    out.update(tsof=t_a, teof=t_b, ip_mean=ft.ip_mean,
-               ft_slope=ft.slope, ft_nrmse=ft.nrmse)
+    out.update(ip_mean=ft.ip_mean, ft_slope=ft.slope, ft_nrmse=ft.nrmse,
+               t_flattop=(ft.t_a, ft.t_b))
 
     # --- OMAHA mode analysis --------------------------------------------
     # both signs: n_detection projects onto exp(+i n phi), so a positive-only
@@ -123,6 +123,28 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
         return out
     out["modes"] = modes
     out["meta"] = meta
+
+    # The magnetics record is finite and can be SHORTER than the flat-top: the
+    # OMAHA slow channels cover a fixed ~1.0 s window, while MAST-U flat-tops
+    # can run to ~1.5 s.  The observed window is the intersection, and it is
+    # the intersection that must be recorded -- writing the Ip-derived t_b
+    # would overstate the dwell time, biasing the base hazard downward at
+    # exactly the late times where accumulated-stress events live.  An event
+    # after the record ends is a censored shot, not an eventless one.
+    t_omaha = modes[int(ntor[0])]["time"]
+    if t_omaha.size < 2:
+        out["reason"] = "empty OMAHA time base"
+        return out
+    t_a = max(t_a, float(t_omaha[0]))
+    t_b = min(t_b, float(t_omaha[-1]))
+    if not (t_b > t_a):
+        out["reason"] = (f"flat-top [{ft.t_a:.4f}, {ft.t_b:.4f}] does not overlap "
+                         f"OMAHA record [{t_omaha[0]:.4f}, {t_omaha[-1]:.4f}]")
+        return out
+    out.update(tsof=t_a, teof=t_b,
+               t_record=(float(t_omaha[0]), float(t_omaha[-1])),
+               truncated=bool(ft.t_b > t_omaha[-1] + 1e-9),
+               lost_exposure=float(max(0.0, ft.t_b - t_omaha[-1])))
 
     # normalised detector trace, per n, restricted to the flat-top window and
     # gated on the toroidal-fit coherence.
@@ -206,7 +228,9 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
         row = {"shot": shot, "isok_rm": 1, "whichn": n_detect,
                "ta_rm": sig["tsof"], "tb_rm": sig["teof"],
                "ip_mean": sig["ip_mean"], "ft_nrmse": sig["ft_nrmse"],
-               "floor": sig["traces"][int(n_detect)]["floor"]}
+               "floor": sig["traces"][int(n_detect)]["floor"],
+               "truncated": int(sig["truncated"]),
+               "lost_exposure": sig["lost_exposure"]}
         row.update(detect_ladder(sig, ladder, n_detect, debounce))
         rows.append(row)
         print(f"{shot}: ok  window [{sig['tsof']:.4f}, {sig['teof']:.4f}] s")
