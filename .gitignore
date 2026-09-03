@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+
+# data products -- large, regenerable
+*.pkl
+*.pickle
+*.nc
+*.dropped.json
+rm_ladder*.csv
+mag_perturbations*.csv
+
+# LaTeX build artefacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# editor
+.*.swp
+.DS_Store

@@ -1,0 +1,1410 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+\usepackage{enumitem}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\bk}{\discretionary{}{}{}}   % zero-width break opportunity
+\setlength{\emergencystretch}{3em}
+\newcommand{\softplus}{\operatorname{softplus}}
+\newcommand{\logit}{\operatorname{logit}}
+
+\title{\bf The \code{fdp-demo-hazard} Workflow\\
+\large A code-level walkthrough of the DIII-D tearing-mode hazard pipeline,\\
+with an extended note on what ``calibration'' means}
+\author{Code reading of \code{\textasciitilde/Python/fdp-demo-hazard}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document traces the hazard-modeling framework in \code{fdp-demo-hazard} starting from the
+driver script \code{fdp-run-study-plain.sh}. The pipeline has five stages: (A) two independent
+magnetics event detectors that emit \emph{event time versus threshold} tables rather than single
+labels; (B) a joint annotation step that turns the two threshold ladders into one right-censored
+survival table and scans the two-dimensional threshold plane; (C) a \code{toksearch} harvest of
+$\sim\!20$--$27$ dimensionless EFIT descriptors; (D) a time-matched merge of EFIT01 and EFIT02 onto
+a common time base so the two reconstructions can be compared on \emph{identical} rows; and (E) a
+gradient-boosted-tree fit of a discrete-time hazard function with a custom objective, nested
+cross-validation, and shot-respecting folds. Section~\ref{sec:calib} answers the specific question
+about calibration: the term is used for two unrelated things in this repository, and the important
+one is a \emph{diagnostic} that establishes the model score $f$ can be read as a physical onset rate
+via $\Delta\,h = \ln(1+e^{f})$. Section~\ref{sec:mastu} lists what must change to port the rotating-mode
+detector to MAST-U.
+\end{abstract}
+
+\tableofcontents
+
+%==============================================================================
+\section{Entry point: \code{fdp-run-study-plain.sh}}
+%==============================================================================
+
+The script is a make-like driver: every stage is guarded by an \code{if [ -f ... ]} test, so a rerun
+in an existing folder resumes rather than recomputes. It takes three arguments,
+
+\begin{center}
+\code{./fdp-run-study-plain.sh <out-folder> [rm-thresh] [lm-thresh]}
+\end{center}
+
+with defaults $5.0$\,G (rotating mode, RM) and $15.0$\,G (locked mode, LM). The header comments
+enumerate the sensitivity study the README asks for: \code{POINT-A} through \code{POINT-F} are six
+$(\text{RM},\text{LM})$ threshold pairs spanning $5.0$--$6.0$\,G and $12$--$17$\,G.
+
+The script does \emph{not} detect events. It consumes two CSV files that must already exist,
+produced upstream by \code{fdp-\bk regen-\bk brm-\bk blm-\bk plain.sh}:
+
+\begin{center}
+\code{fdp-\bk regen-\bk brm-\bk plain-\bk 155001-\bk 198100.csv} \quad and \quad \code{fdp-\bk regen-\bk blm-\bk ic-\bk 155001-\bk 198100.csv}
+\end{center}
+
+covering DIII-D shots $155001$--$198100$. Three design decisions are visible in the first 120 lines
+and they set the tone for the whole framework:
+
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{Thresholds are pinned to the output folder.} The chosen $(\text{RM},\text{LM})$ pair is
+written to \code{<folder>/thresholds.txt} on first run and \emph{checked by string comparison} on
+every subsequent run; a mismatch is a hard exit. This prevents a folder from accumulating results
+generated under different labelings.
+\item \textbf{The source tables are watermarked.} The MD5 of the concatenated RM and LM CSVs is
+computed and embedded in the threshold-scan pickle filename,
+\code{fdp-\bk regen-\bk thresh-\bk scan-\bk plain-\bk <md5>.pickle}. Regenerating the detector output invalidates the
+cached scan automatically.
+\item \textbf{Everything downstream is a pure function of the joint annotation file.} The single
+artifact that connects detection to modeling is \code{fdp-regen-joint-NEW.csv}.
+\end{enumerate}
+
+The stage sequence is:
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.23\textwidth}>{\raggedright\arraybackslash}p{0.30\textwidth}>{\raggedright\arraybackslash}p{0.39\textwidth}@{}}
+\toprule
+\textbf{Step} & \textbf{Program} & \textbf{Artifact} \\
+\midrule
+\endhead
+Threshold-plane scan & \code{eventPathway\bk Analysis\bk Plain.py} \newline \code{--calc-llikl-surface} (24 procs, \code{srun}) & \code{fdp-\bk regen-\bk thresh-\bk scan-\bk plain-\bk <md5>.pickle} \\
+Threshold contour figure & \code{checkPathwayPickle.py} & \code{fdp-run-contours-NEW.pdf} \\
+Joint annotation at chosen thresholds & \code{eventPathway\bk Analysis\bk Plain.py} \newline \code{--amp-combined-csv} & \code{fdp-regen-joint-NEW.csv} \\
+Feature harvest, EFIT01 & \code{extractEqDescriptor.py} (\code{toksearch\_submit}) & \code{fdp-\bk descriptor-\bk NEW-\bk efit01.pickle} \\
+Feature harvest, EFIT02 & \code{extractEqDescriptor.py} & \code{fdp-\bk descriptor-\bk NEW-\bk efit02.pickle} \\
+Time-matched merge & \code{processEq\bk Descriptor\bk Pair.py} \newline \code{--merge} & \code{fdp-\bk tabular-\bk merged-\bk NEW-\bk efit01-\bk efit02-\bk all.pickle} \\
+Model ensembles ($6$ ablations $\times$ 2 EFITs) & \code{fdp-\bk run-\bk study-\bk xgb-\bk ensembles.sh} $\rightarrow$ \code{sbatch} & \code{fdp-\bk outer-\bk preds-\bk *-\bk models.pickle} \\
+Held-out predictions + SHAP ($3$ ablations $\times$ 2) & \code{fdp-\bk run-\bk study-\bk xgb-\bk outerpreds.sh} & \code{fdp-outer-preds-*.pickle} \\
+\bottomrule
+\end{longtable}
+
+\noindent
+The script ends after \code{sbatch} submission; it does not wait for results. Two further suites
+(\code{launch\_ml\_pooled\_experiments}, \code{launch\_ml\_elimination\_experiments}) are present but
+switched off by flag.
+
+The six ablations define the feature-set experiment, and this is where the ``20 or so features''
+of the study design actually appear:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Tag & Excluded & Count \\
+\midrule
+\code{FULL}   & ---                                              & 27 \\
+\code{NOPQ}   & \code{pres0 pres50 dpres50 q33 q67 dq67}         & 21 \\
+\code{NOP}    & \code{pres0 pres50 dpres50}                      & 24 \\
+\code{NOQ}    & \code{q33 q67 dq67}                              & 24 \\
+\code{NOGL}   & \code{glitch}                                    & 26 \\
+\code{NOPQ0}  & \code{pres0 pres50 dpres50 q0 q33 q67 dq67}      & 20 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{NOPQ} (21 features) and \code{NOPQ0} (20 features) are the profile-free sets: they use only
+0-D EFIT scalars and drop everything derived from the \code{pres} and \code{qpsi} profile nodes.
+These are the ``$\sim$20 feature'' configurations, and they are the only two ablations that appear
+in \emph{both} the ensemble and the held-out-prediction suites, i.e.\ they are the intended headline
+models.
+
+%==============================================================================
+\section{Stage A --- the two magnetics detectors}
+%==============================================================================
+
+Run separately via \code{./fdp-regen-brm-blm-plain.sh 4 155001 198100}. Both detectors share a
+common philosophy that is worth stating explicitly because it is the single most transferable idea
+in the repository:
+
+\begin{quote}
+\textbf{A detector never emits a label. It emits the first crossing time as a function of a
+threshold ladder.} The threshold becomes a post-processing parameter, and the sensitivity study
+costs no re-computation over the database.
+\end{quote}
+
+The RM CSV therefore carries $117$ columns named \code{rm1.0000g} $\dots$ \code{rm30.0000g}
+(1--30\,G, $0.25$\,G steps), and the LM CSV carries $2\times73$ columns \code{in*g}/\code{ex*g}
+(4--40\,G, $0.5$\,G steps), one entry per shot per level, \code{NaN} if never crossed.
+
+\subsection{Shared analysis window: flat-top detection}
+
+Both detectors call \code{iptimestamp.iptimestamp} (\code{iptimestamp.py}) on \code{ip}. It smooths
+$I_p$ with a $500$\,ms boxcar, differentiates, finds the maximum and minimum ramp rates, and
+back-tracks to where the rate falls below $\alpha=0.20$ of the extremum, giving four timestamps
+$t_{10},t_{11}$ (ramp-up start/end) and $t_{20},t_{21}$ (ramp-down start/end). The analysis window
+is $[t_A,t_B]=[t_{11},t_{20}]$, subject to:
+
+\begin{itemize}[leftmargin=2em,noitemsep]
+\item $t_A > 0.40$\,s, $t_B > t_A$, $t_B > 1.00$\,s;
+\item if \code{t2ratio} $< 1.05$ the shot is presumed disrupted, and $t_B$ is pushed to
+$0.55\,t_{20} + 0.45\,t_{21}$ to avoid discarding the pre-disruption data;
+\item $|\langle I_p\rangle| > 0.50$\,MA over the window (from \code{flattopness}, which also
+returns a linear-fit slope and normalized RMSE as flat-top quality metrics).
+\end{itemize}
+
+Shots failing any test get \code{trange = None} and are dropped. All of these numbers are DIII-D
+specific.
+
+\subsection{RM detector: \code{brm\_\bk events\_\bk modespyec.py} + \code{modespyec.py}}
+
+This is the ``plain'' detector; the older even/odd-parity code (\code{mpxspec.py}, invoked with
+\code{--mpxspec-classic}) is run in parallel only for comparison. The docstring states the
+simplification: no attempt to separate odd from even toroidal phase, on the argument that a
+sufficiently high amplitude threshold already excludes sawteeth.
+
+\paragraph{Inputs.} Ten midplane $\dot B$ probes with the \code{d} suffix
+(\code{mpi66m067d}\dots\code{mpi66m340d}, plus \code{mpi11m322d}), with hard-coded toroidal angles
+$67.5^\circ, 97.4^\circ, \dots, 339.7^\circ$. The code asserts a $5\,\mu$s sample interval to within
+$0.1\%$ (\code{okTs}), i.e.\ $200$\,kHz.
+
+\paragraph{Pipeline (per probe pair).} \code{summarize\_consecutive\_circular\_pairs} forms the nine
+\emph{consecutive circular pairs} $(i,i{+}1 \bmod 9)$ of the outboard probes and calls
+\code{wsfft\_paired\_signal} on each:
+
+\begin{itemize}[leftmargin=2em]
+\item sliding-window FFT, \code{blocksize}$=1024$, \code{blockstride}$=512$, \code{nfft}$=1024$,
+Hamming window --- so a $5.12$\,ms analysis window every $2.56$\,ms;
+\item per-block mean removal, auto-spectra $X_{11},X_{22}$ and cross-spectrum $X_{12}$;
+\item boxcar smoothing over \code{nfsmooth}$=7$ frequency bins, then magnitude-squared coherence
+$C_{12} = |S_{12}|^2/(S_{11}S_{22})$;
+\item the \code{modespec} $95\%$ coherence significance level \code{c95} is reproduced verbatim,
+$c_{95}=\tanh^2\!\big(1.96/\sqrt{2n_{\rm sm}-2}\big)$.
+\end{itemize}
+
+\paragraph{Toroidal mode number.} From the cross-phase,
+\begin{equation}
+\hat n(f,t) \;=\; -\frac{180^\circ}{\pi}\,\frac{\arg S_{12}(f,t)}{\Delta\theta},
+\end{equation}
+where $\Delta\theta$ is that pair's toroidal separation in degrees (wrapped positive).
+
+\paragraph{Amplitude, and the $\dot B \to B$ conversion.} \code{get\_amplitude} with
+\code{integrated=True} builds a frequency mask $W(f,t)$ that keeps a bin only if
+\begin{equation}
+C_{12} \ge 0.975 \quad\text{and}\quad \big|\,|\hat n| - |n|\,\big| \le 0.25 ,
+\end{equation}
+(coherence gate and ``integerness'' gate, \code{coh-min} and \code{eps-int}), weights it by
+$1/\hat\omega^2$ with $\hat\omega = \pi k / (n_{\rm fft}/2)$ and DC forced to zero, and returns
+\begin{equation}
+A_n(t) \;=\; T_s\sqrt{\,\mathrm{ff}\sum_f \tfrac{1}{\hat\omega^2}\,\tfrac{1}{2}\big(X_{11}+X_{22}\big)}
+\;=\; \sqrt{\sum_f \Big(\tfrac{1}{\omega}\Big)^{\!2} \tfrac{1}{2}\big(X_{11}+X_{22}\big)\,\mathrm{ff}},
+\end{equation}
+since $\omega = \hat\omega/T_s$. This is a frequency-domain time integration: $|B| = |\dot B|/\omega$.
+The result is multiplied by $10^{4}$ to give an RMS $n=1$ field perturbation in \textbf{Gauss}.
+The normalization $\mathrm{ff} = 2/(p_w \cdot \text{blocksize} \cdot n_{\rm fft})$, with
+$p_w$ the window power, is what makes the number an honest RMS.
+
+\paragraph{Robust pair average.} The nine per-pair amplitudes are sorted at each time and the two
+lowest and two highest are dropped (\code{robust-mean-trim-lo/hi}$=2$), leaving the mean of the
+middle five. This is the defence against a single bad channel or a locally poor coherence.
+
+\paragraph{Triggering.} \code{detect\_events} runs \code{event\_detector\_} on the $n=1$ Gauss trace
+restricted to $[t_A,t_B]$: a Schmitt trigger with \emph{both} levels equal to the threshold (no
+hysteresis) and an $8$\,ms debounce on each flank (\code{debounceDelayTime}). The reported event
+time is back-dated by the debounce clock, so it is the \emph{crossing} time, not the confirmation
+time. Only the first positive flank per threshold is retained.
+
+\subsection{LM detector: \code{blmEvents.py}}
+
+Different diagnostics, different physics goal: detect a locked or born-locked $n=1$ island, including
+the case where it never rotated.
+
+\paragraph{Sensors.} Eight saddle loops (\code{isld*}, radial) and ten midplane probes
+(\code{mpid*}, tangential) --- the ``two-axis'' scheme. Pointname sets switch at shot $181137$
+(\code{'old'} vs \code{'new'} naming), which is a maintenance trap worth noting.
+
+\paragraph{Handedness.} $\operatorname{sign}(\langle B_t\rangle\langle I_p\rangle)$ selects
+\code{RH} or \code{LH}, which selects between \code{MmatrixRH.txt} and \code{MmatrixLH.txt}.
+
+\paragraph{Mode decomposition.} The PCS $M$-matrix (parsed from the pipe-delimited PCS text file)
+is a least-squares estimator mapping the 18 sensor channels onto 12 targets: $\sin$/$\cos$
+components of $n=1,2,3$ separated into \code{in}ternal and \code{ex}ternal source contributions
+(\code{dgsinn1sin}, \code{dgsexn1cos}, \dots). $Z = Y M^{\!\top}$, and
+$A_{n=1}^{\rm in} = 10^4\sqrt{s^2+c^2}$ Gauss.
+
+\paragraph{Missing channels.} If any sensor is unusable, the matrix is \emph{recomputed} rather than
+patched: \code{RecoverDesignMatrix} pseudo-inverts $M$ back to the design matrix $X$ via SVD, the
+corresponding rows of $X$ are deleted, and \code{ComputeEstimationMatrix} forms
+$M' = (X^{\!\top}X)^{-1}X^{\!\top}$ for the surviving subset. A round-trip consistency test
+(\code{TestEstimationMatrixHandling}, tolerance $10^{-14}$) is asserted at startup. At least
+\code{min\_sensors}$=14$ of 18 must survive.
+
+\paragraph{Preprocessing.} \code{dynamic\_rebaselining} subtracts a delayed first-order low-pass
+estimate of the baseline ($\tau_b = 100$\,ms, delay $\tau_d = 100$\,ms) and applies a $\tau_f=5$\,ms
+smoothing --- effectively a delayed high-pass that removes slow drift without killing the island
+signal.
+
+\paragraph{Coil compensation.} See Section~\ref{sec:magcalib}; this is the second thing the
+repository calls calibration.
+
+\paragraph{Triggering.} \code{DetectEventAtLevel} $\rightarrow$ \code{auxParseSingleTrace}, same
+Schmitt-plus-debounce logic, $10$\,ms delay, over the ladder of \code{trig\_levels}. Both
+\code{in} and \code{ex} branches are tabulated; \textbf{only the internal branch is used downstream.}
+
+\subsection{Per-threshold base rates}
+
+\code{brmEventsCounter.py} and \code{blmEventsCounter.py} collapse each ladder into a small table
+of (threshold, event count, total dwell time, base hazard $=$ counts$/$dwell). The pair of summary
+PDFs generated by \code{mergedEventsExtractPlot.py} shows event count and base rate versus
+threshold for all four detector variants (RM plain, RM classic, LM compensated, LM uncompensated).
+This is the sanity check to run first on any new machine: the curve should fall smoothly and show a
+knee where the detector leaves the noise/sawtooth regime.
+
+%==============================================================================
+\section{Stage B --- joint labels and the threshold plane}
+%==============================================================================
+
+\subsection{Joining the two detectors}
+
+\code{eventPathway\bk Analysis\bk Plain.py} inner-joins the RM and LM tables on shot, then filters:
+\code{isok\_rm==1}, \code{isok\_lm==1}, \code{whichn==1} (RM detection was on $n=1$), and
+--- crucially --- \code{ta\_rm==ta\_lm} \emph{and} \code{tb\_rm==tb\_lm}. Shots where the two
+detectors saw different flat-top windows are discarded so that every surviving shot has identical
+exposure in both channels. Optional cuts on $|\langle I_p\rangle|$ and $|\langle B_t\rangle|$ exist
+but are unused by the driver.
+
+\subsection{The four pathways}
+
+\code{pathway\_utils.pathway\_type} classifies each shot from $(t_{\rm SOF},t_{\rm EOF},t_{\rm LM},t_{\rm RM})$:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Condition & Pathway & Markov transitions \\
+\midrule
+neither finite & \code{uneventful} & PRE$\to$EOF \\
+RM only & \code{rotating-only} & PRE$\to$RM1$\to$EOF \\
+LM only & \code{born-locked-only} & PRE$\to$LM1$\to$EOF \\
+$t_{\rm RM}<t_{\rm LM}$ & \code{rotating-then-lock} & PRE$\to$RM1$\to$LM2$\to$EOF \\
+$t_{\rm LM}<t_{\rm RM}$ & \code{born-locked-then-rotating} & PRE$\to$LM1$\to$RM2$\to$EOF \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{OnsetStateAccumulator} accumulates, over the whole database, the dwell time in each of the six
+states and the counts of each transition, giving a jump matrix $J$ and a rate matrix
+$R_{ij} = J_{ij}/T_i$. So the framework contains a coarse \emph{continuous-time Markov} description
+of the RM/LM ordering, independent of any machine learning.
+
+\subsection{The threshold-plane scan}
+
+For every one of the $73\times117 = 8541$ threshold combinations, the accumulator is rebuilt and a
+profiled log-likelihood is evaluated (\code{log\_likelihood}):
+\begin{equation}
+\mathcal{L}^{\rm exp}_s = N_s\!\left(\ln\frac{N_s}{T_s} - 1\right),
+\qquad
+\mathcal{L}^{\rm cat}_s = \ln\!\binom{N_s}{\{J_{s\cdot}\}} + \sum_j J_{sj}\ln\frac{J_{sj}}{N_s},
+\end{equation}
+the first being the exponential-holding-time likelihood at its MLE rate $\hat\lambda_s = N_s/T_s$,
+the second the multinomial likelihood of the branch counts. \code{checkPathwayPickle.py} sums these
+over states $\{$PRE, RM1, LM1, LM2$\}$ and renders the result --- plus pathway fractions, dwell
+maps and selected transition rates --- as images and contour plots over the
+(RM threshold, LM threshold) plane, with the operating point marked by
+\code{--plot-amp-rm}/\code{--plot-amp-lm}.
+
+\medskip
+\noindent\textbf{A caveat worth carrying into the MAST-U work.} These likelihoods are computed on
+data that \emph{changes} with the threshold: the event times themselves are threshold-derived. The
+surface is therefore not a likelihood in the sense that would license a likelihood-ratio test or an
+argmax, and the code does not treat it as one --- nothing auto-selects a threshold. It is a
+regularity/sharpness map, read together with the pathway-fraction contours, and the actual defence
+against threshold arbitrariness is the \code{POINT-A}\dots\code{POINT-F} repetition of the entire
+study. The README says as much: \emph{``final analysis must study the sensitivity of the results
+w.r.t.\ these thresholds''}.
+
+\subsection{The joint annotation file}
+
+\code{collect\_stats\_panda} writes one row per shot:
+
+\begin{center}
+\code{shot, tsof, teof, trm, tlm, tevent, ievent}
+\end{center}
+
+with $t_{\rm event} = \min(t_{\rm EOF}, t_{\rm RM}, t_{\rm LM})$ and
+$i_{\rm event} = \arg\min$ over that same triple, so
+
+\begin{center}
+\begin{tabular}{@{}cl@{}}
+\toprule
+\code{ievent} & meaning \\
+\midrule
+0 & no event; the record is \textbf{right-censored} at end of flat-top \\
+1 & first event was a rotating mode \\
+2 & first event was a locked / born-locked mode \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This is a survival table. Only the \emph{first} event matters; everything after $t_{\rm event}$ is
+discarded.
+
+%==============================================================================
+\section{Stage C --- EFIT feature harvest}
+%==============================================================================
+
+\code{extractEqDescriptor.py} runs a \code{toksearch} pipeline over the shots in the joint
+annotation file, once per EFIT tag. \code{scratch.create\_annotation\_index\_alt} reads the CSV and
+sets, per shot, $t_a = t_{\rm sof}$, $t_b = t_{\rm event}$ (\textbf{not} $t_{\rm eof}$) and
+\code{event}$=i_{\rm event}$. The descriptor table is then chopped to $[t_a,t_b]$, so each shot
+contributes an equilibrium time series that ends at its own event or censoring time.
+
+Every feature is deliberately \textbf{dimensionless}, normalized by $R_0$ (\code{RZERO}, asserted
+constant) or by a physical scale:
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.19\textwidth}l>{\raggedright\arraybackslash}p{0.55\textwidth}@{}}
+\toprule
+\textbf{Feature} & \textbf{Source} & \textbf{Definition / note} \\
+\midrule
+\endhead
+\code{rmin rmax zmin zmax} & \code{BDRY}, \code{NBBBS} & boundary bounding box $/R_0$ \\
+\code{aspr}   & \code{AMINOR}  & $R_0/a$ (or from bbox with \code{--use-alts}) \\
+\code{kappa}  & \code{KAPPA}   & elongation \\
+\code{iphat}  & derived        & $\mu_0 I_p / (B_{t0}\,a)$ --- an inverse-$q$-like current measure \\
+\code{nhat}   & \code{DENSITY} & $\bar n / n_{\rm GW}$, $n_{\rm GW}=|I_p[\mathrm{MA}]|/(\pi a^2)$ \\
+\code{q0 q95} & \code{Q0 Q95}  & safety factor \\
+\code{elli}   & \code{LI}      & internal inductance $\ell_i$ \\
+\code{rcur zcur} & \code{RCUR ZCUR} & current centroid $/R_0$ \\
+\code{betap betat} & \code{BETAP BETAT} & \\
+\code{tritop tribot} & \code{TRITOP TRIBOT} & triangularity \\
+\code{shaf1 shaf2 shaf3} & \code{S1 S2 S3} & Shafranov integrals \\
+\code{glitch} & derived & $\tfrac{s_1}{4} + \tfrac{s_2}{4}\!\left(1+\tfrac{R_{\rm cur}}{R_0}\right) - \left(\beta_p + \tfrac{\ell_i}{2}\right)$ \\
+\code{pres0 pres50 dpres50} & \code{PRES} & $p$ and $\partial p$ at $\psi_N = 0, 0.5$, normalized by $B_{t0}^2/2\mu_0$ \\
+\code{q33 q67 dq67} & \code{QPSI} & $q$ and $\partial q$ at $\psi_N = 0.33, 0.67$ \\
+\code{error chisq} & \code{ERROR CHISQ} & \emph{not} model features --- retained for screening only \\
+\bottomrule
+\end{longtable}
+
+\paragraph{The \code{glitch} feature.} This deserves a note because the README flags it as an open
+item. The Shafranov relation gives, approximately,
+$\tfrac{s_1}{4} + \tfrac{s_2}{4}(1 + R_{\rm cur}/R_0) \approx \beta_p + \ell_i/2$. The feature is the
+\emph{residual} of that identity, i.e.\ a measure of the equilibrium reconstruction's internal
+self-inconsistency. It is not plasma physics; it is a reconstruction-quality signal --- which is
+exactly why the \code{NOGL} ablation exists, and why an entry in the README asks for a CER cross
+check. The \code{NOGL} versus \code{FULL} comparison answers whether the model is partly exploiting
+fit pathology rather than physics.
+
+%==============================================================================
+\section{Stage D --- the matched EFIT01/EFIT02 merge}
+%==============================================================================
+
+This stage is the point of the ``matched study''. EFIT01 (automatic, magnetics-only) has far better
+shot and time coverage; EFIT02 needs more diagnostics and is thought better where it exists. A fair
+comparison requires the two to be evaluated on the same rows.
+
+\code{processEqDescriptorPair.py --merge} takes EFIT01 as \code{--primary} and, per shot, for each
+primary timestamp $t_k$, searches EFIT02 for any slice within $\pm\delta$ ($\delta = 5$\,ms default)
+and takes the earliest match; unmatched rows become \code{NaN}. The output
+(\code{--save-merge-flattened-all}) is a single flat dictionary:
+
+\begin{center}
+\code{X1} (EFIT01), \code{X2} (EFIT02, matched), \code{T} (time), \code{ID} (shot), \code{Y} (label), \code{Xnames}, \code{tag1}, \code{tag2}
+\end{center}
+
+with \code{X1} and \code{X2} sharing the same shape, row indexing, and column names by construction.
+
+\paragraph{Label placement.} In \code{table\_stack}:
+\begin{verbatim}
+if T12[i]["event"] > 0:
+    if T12[i]["tb"] - ith_tend <= event_delta:   # event_delta = 40 ms
+        Y[r + ni - 1] = T12[i]["event"]
+    else:
+        lost_events += 1
+\end{verbatim}
+So \textbf{exactly one row per event shot carries a label, the last one}, and only if the last
+available EFIT slice is within $40$\,ms of the event time. If the EFIT grid ran out earlier, the
+event is \emph{dropped} and counted in \code{lost\_events} --- a printed diagnostic worth watching.
+Censored shots contribute all-zero rows. \code{Y} temporarily holds the event \emph{type} $(1,2)$;
+\code{prep\_regression\_tables} later binarizes it, so the trained model pools the two competing
+risks into a single ``TM onset'' event. The type information survives in the tables and could be
+used for a competing-risks extension.
+
+\paragraph{Screening.} \code{apply\_double\_screening} (\code{tabular\_limits.py}) requires a row to
+pass limits in \emph{both} EFITs --- $\chi^2 \le 90$, \code{error} $\le 5\times10^{-3}$,
+$0 \le \hat n \le 2$, $\beta_p,\beta_t > 0$, $0 < q_0 \le 10$, $1 < q_{95} \le 20$, plus generous
+bounds on the pressure features. \code{chisq} and \code{error} are then removed from the feature
+list. The \code{--limits auto} alternative derives limits from the $0.05\%/99.95\%$ quantiles of
+each column instead.
+
+%==============================================================================
+\section{Stage E --- the boosted-tree hazard model}
+%==============================================================================
+
+\subsection{The objective is a survival likelihood, not a classifier}
+
+\code{xgb\_hazard\_common.py} supplies a custom XGBoost objective. With $f$ the raw margin and
+$p = \sigma(f) = (1+e^{-f})^{-1}$,
+\begin{equation}
+\ell(y,f) = -y\ln p - (1-y)\ln(1-p),
+\qquad
+g = p - y, \qquad h = p(1-p),
+\end{equation}
+which is ordinary logistic loss --- but applied to \emph{this} table it is exactly the discrete-time
+survival log-likelihood with right censoring. A shot observed over slices $k = 1\dots K$
+contributes
+\begin{equation}
+\underbrace{\prod_{k=1}^{K-1}\big(1-p_k\big)\cdot p_K}_{\text{event at } K}
+\qquad\text{or}\qquad
+\underbrace{\prod_{k=1}^{K}\big(1-p_k\big)}_{\text{censored}} ,
+\end{equation}
+and these are precisely the products of Bernoulli terms produced by the one-1-at-the-end labeling.
+The custom objective is registered rather than using \code{binary:logistic} so that the reported
+metric is $\langle$nllikl$\rangle$ in nats/sample, comparable across runs and directly against a
+base-rate model.
+
+\subsection{Base-rate anchoring}
+
+Before every fit,
+\begin{equation}
+\code{base\_score} = \logit\!\left(\frac{\sum_i y_i}{N}\right)
+\end{equation}
+computed \emph{on the training partition only}. Two consequences: the boosting starts from the
+correct event rate rather than from $0$, and $f = f_{\rm base}$ acquires the meaning ``no
+information beyond the population base rate''. Every log-odds figure in the codebase draws that
+line.
+
+\subsection{Shot-respecting resampling}
+
+All splitting goes through the shot key \code{S}. \code{make\_xgb\_cv\_folds} partitions
+\emph{unique shots} $K$-ways, and \code{outer\_fold\_test\_preds} asserts the train/test shot-number
+intersection is empty. Since consecutive EFIT slices within a shot are strongly correlated, a naive
+row-wise split would leak badly and inflate performance. The nesting is:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Outer loop & \code{test-fold-K} shot-disjoint folds, repeated \code{num-K-samples} times \\
+Inner loop & \code{cross-validation-k}-fold \code{xgb.cv} for early stopping (patience 25) \\
+Rounds & \code{max-rounds} $=1000$, best round $= \arg\min$ of \code{test-<nllikl>-mean} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The ensemble suite uses $8$ outer folds $\times\,10$ repeats; the held-out-prediction suite uses
+$12$ outer folds $\times\,5$ repeats with SHAP. Hyperparameters (both drivers):
+\code{max\_depth}$=6$, \code{eta}$=0.10$, \code{lambda}$=0.01$, \code{min\_child\_weight}$=5$,
+\code{tree\_method=hist}, \code{max\_bin}$=512$.
+
+\subsection{What comes out}
+
+\code{outer\_fold\_test\_preds} returns an $N \times B$ matrix \code{PREDS} in which
+\emph{every row is a genuinely out-of-sample log-odds}, from a model that never saw that shot, with
+$B$ independent repeats providing a spread. This matrix is the input to the calibration diagnostic
+and to every per-shot trace plot. Also saved: the fitted booster ensemble with its training shot
+keys (\code{--save-model-ensemble}), per-row SHAP contributions, and the pooled losses against the
+base-rate loss.
+
+\subsection{Two further model-inspection machines}
+
+\begin{itemize}[leftmargin=2em]
+\item \textbf{Elimination paths} (\code{elimination\_path\_outer\_sample}): repeatedly train, log
+held-out loss, drop the least important feature, repeat to exhaustion --- once per outer fold. No
+decision is taken on test performance, so the resulting loss-versus-feature-count curve is a
+descriptive object. Inspect with \code{python xgbShowElimination.py --folder <folder>}. The README
+notes an unresolved puzzle: the shuffle-control path is suspiciously orderly, likely a
+random-tie-breaking artifact in \code{argmin} over importances.
+\item \textbf{Feature linkage} (\code{feature\_distance\_matrix}): fit $n_x$ univariate models, then
+try to predict each univariate model's output from every \emph{other} single feature, and score with
+KL divergence in both directions. Small distance $\Rightarrow$ redundancy. This is the intended
+answer to ``which of my 20 features are really the same feature''. Presentation is still a README
+TODO.
+\end{itemize}
+
+%==============================================================================
+\section{Calibration --- what it is, what it does, what it is for}
+\label{sec:calib}
+%==============================================================================
+
+The word \emph{calibration} is used in this repository for two entirely unrelated operations. Both
+are worth knowing, but only the first is what the modeling discussion refers to.
+
+%------------------------------------------------------------------
+\subsection{Hazard calibration (the statistical one)}
+%------------------------------------------------------------------
+
+\textbf{Where:} \code{plot\_calibration} in \code{xgbDescriptorModel.py} (flag
+\code{--full-table-model-calib}); standalone in \code{testcalib.py}; Bayesian version in
+\code{test\_beta\_prior.py}; older sibling in \code{evalGBM.py}.
+
+\subsubsection*{The problem it solves}
+
+The trained booster emits a dimensionless margin $f(x)$. A log-odds is not a physical quantity: it
+is defined only relative to the sampling interval used to build the labels. What a hazard study
+actually needs is a \textbf{rate} $h(x)$ in $\mathrm{s}^{-1}$ --- something that can be integrated
+into a survival curve, quoted as an expected time-to-onset, or compared between machines. The
+calibration step is the bridge, and the bridge is one identity.
+
+\subsubsection*{The identity}
+
+Each table row represents one EFIT slice covering a time interval $\Delta$. The model's $p$ is the
+probability that onset happens \emph{in that interval}. For a constant hazard $h$ across the interval,
+\begin{equation}
+p \;=\; 1 - e^{-h\Delta}
+\qquad\Longrightarrow\qquad
+h\Delta \;=\; -\ln(1-p) \;=\; -\ln\!\left(1 - \frac{1}{1+e^{-f}}\right),
+\end{equation}
+\begin{equation}
+\boxed{\;h\Delta \;=\; \ln\!\left(1+e^{f}\right) \;=\; \softplus(f)\;}
+\label{eq:link}
+\end{equation}
+
+So the softplus of the model margin \emph{is} the dimensionless hazard $\Delta h$, and
+\begin{equation}
+h(x) = \frac{\softplus\big(f(x)\big)}{\Delta} \;\;[\mathrm{s}^{-1}],
+\qquad
+H(t) = \sum_{k\,:\,t_k \le t}\softplus(f_k),
+\qquad
+S(t) = e^{-H(t)},
+\end{equation}
+\begin{equation}
+\text{hazard ratio} \;=\; \frac{\softplus\big(f(x)\big)}{\softplus\big(f_{\rm base}\big)},
+\qquad
+f_{\rm base} = \logit\!\left(\frac{E}{N}\right).
+\end{equation}
+Every one of these appears in \code{testcalib.py}: \code{hazhat = np.log(1 + np.exp(FS))},
+\code{cumh = np.cumsum(hazhat)}, the \code{hazhat/H0} ratio panel, and the per-shot CSV columns
+\code{avgh}, \code{avghr}, \code{endhr}. The author's own scale reference in the comments:
+``\emph{baserate means that the expected dwell time is $\sim 10$ seconds}'' --- consistent with
+$E/N \sim 2\times10^{-3}$ at $\Delta \approx 20$\,ms.
+
+\subsubsection*{The plot, and how to read it}
+
+The calibration figure is a reliability diagram, but drawn in hazard units against the raw margin:
+
+\begin{enumerate}[leftmargin=2em]
+\item Bin the pooled held-out margins $f$ into \code{nbins}$=40$ bins spanning the
+$[1\%, 99\%]$ quantile range of $f$ (the tails are cut because they hold too few samples for a rate
+estimate).
+\item Per bin, count all samples $C$ and event samples $E$. Repeat for each of the $B$ prediction
+replicas, giving $B$ curves.
+\item Plot $\overline{E/C}$ against bin centre, and overlay the reference curve
+$y = \ln(1+e^{f})$.
+\item Mark the base rate as a horizontal line $h_0 = \softplus(f_{\rm base})$ and a vertical line at
+$f_{\rm base}$.
+\end{enumerate}
+
+The empirical $E/C$ in a bin estimates the interval event probability $p$, whereas the reference
+line is $-\ln(1-p)$. These agree to $O(p^2)$, and with $p \sim 2\times 10^{-3}$ the difference is
+invisible --- which is exactly why the same curve can be labelled ``ideal calibration'' and the
+$y$-axis labelled ``normalized hazard $\Delta \cdot h$'' without contradiction. A companion
+two-axis figure shows the raw sample and event counts per bin, so you can see \emph{where} the
+statistics support the claim.
+
+\medskip
+\noindent Diagnosis:
+\begin{itemize}[leftmargin=2em,noitemsep]
+\item \textbf{Points on the line} --- the score is a calibrated hazard. You may quote
+$h = \softplus(f)/\Delta$ in $\mathrm{s}^{-1}$, integrate it, and use hazard ratios.
+\item \textbf{Points systematically flatter than the line} --- the model is over-confident at the
+extremes: high-$f$ samples do not fail as often as claimed. Typically over-fitting, or leakage from
+a train/test split that did not respect shots.
+\item \textbf{Points steeper} --- under-confident; the model is shrinking too hard toward the base
+rate.
+\item \textbf{Curve crosses the base-rate lines away from their intersection} --- the base-rate
+anchoring is off, e.g.\ the screening changed $E/N$ after \code{base\_score} was set.
+\item \textbf{Wide spread across the $B$ replicas in a bin} --- that region of feature space is not
+resolved by the data volume; do not quote a rate there.
+\end{itemize}
+
+\subsubsection*{Three things it is \emph{not}}
+
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{It is not a fitting step.} There is no Platt scaling and no isotonic regression
+anywhere in this repository. Nothing is refit, rescaled, or corrected. Calibration here is purely a
+\emph{verification} that the raw margins can be read as rates. If the curve missed the reference
+line, the response would be to change the model or the labeling, not to post-hoc warp the output.
+This is the single most common misreading of the term, and the reason the code says
+``calibratedness''.
+\item \textbf{It is not an in-sample plot in the runs that matter.} The honest version consumes
+\code{PREDS} from \code{outer\_fold\_test\_preds}: every margin comes from a model trained without
+that shot. The \code{--full-table-model --full-table-model-calib} combination \emph{does} produce an
+in-sample version, which is useful for debugging and optimistic by construction.
+\item \textbf{It is not a discrimination metric.} A model can be perfectly calibrated and useless
+(predict the base rate everywhere --- it sits at a single point on the line). Calibration and
+sharpness are separate axes: the loss comparison \code{avg\_llikl} versus \code{avg\_llikl\_0}
+carries the sharpness claim, the calibration plot carries the interpretability claim.
+\end{enumerate}
+
+\subsubsection*{The $\Delta$ dependence --- the part that bites when porting}
+
+Equation~\eqref{eq:link} contains $\Delta$. The consequences are easy to get wrong:
+
+\begin{itemize}[leftmargin=2em]
+\item The labels, the base rate $E/N$, and hence the entire $f$ scale are properties of the
+\textbf{EFIT slice cadence}. Halving $\Delta$ roughly halves $E/N$ and shifts every $f$ by
+$\approx \ln 2$.
+\item Therefore \textbf{$f$ is not portable} across machines, EFIT variants, or time bases. Only
+$h = \softplus(f)/\Delta$ is, and only if $\Delta$ is genuinely uniform.
+\item \code{check\_data\_status} prints \code{np.median(np.diff(data["T"]))} for exactly this
+reason --- confirm $\Delta$ before quoting any rate. Note that this median is taken across shot
+boundaries in the flattened table; it is a diagnostic, not a rigorous per-shot cadence check.
+\item The framework assumes a fixed $\Delta$. A non-uniform time grid would require an explicit
+exposure/offset term in the objective (a Poisson-style $\ln \Delta_i$ offset), which is not
+implemented. Worth checking before adopting a variable-cadence equilibrium code.
+\end{itemize}
+
+%------------------------------------------------------------------
+\subsection{Magnetics calibration / compensation (the hardware one)}
+\label{sec:magcalib}
+%------------------------------------------------------------------
+
+The same word appears in the detector layer with a completely different meaning: removing known
+non-plasma contributions and putting probe signals on an absolute physical scale.
+
+\paragraph{Coil pickup compensation (LM detector).} \code{ExtractCompensationCoefficients} reads
+\code{cm\_2018.sav}, an IDL save file holding a coil$\times$probe matrix \code{cm} of mutual coupling
+coefficients. With \code{--dcccoils --dcicoils} the driver requests compensation for the six C-coils
+and twelve I-coils, and the pipeline subtracts the predicted pickup before any mode fitting:
+\begin{verbatim}
+X = X - np.dot(time_rebase_columns(coil_t, coil_X[:, ok], t), compMatrix)
+\end{verbatim}
+Without this, deliberately applied 3D fields (error-field correction, RMP) appear in the sensors as
+an apparent $n=1$ island and trigger the LM detector. The driver deliberately produces \emph{both}
+versions --- \code{fdp-regen-blm-nic-*} (uncompensated) and \code{fdp-regen-blm-ic-*}
+(compensated) --- and the study consumes the compensated one. Comparing the two base-rate-versus-threshold
+curves quantifies how much of the raw LM count was coil pickup. The
+internal/external $M$-matrix separation is a second, independent line of defence against the same
+contamination, which the file header concedes works ``imperfectly''; \code{checkCompensation.R} and
+\code{magneticsCheckPCS.R} exist to audit this.
+
+\paragraph{Absolute amplitude scale (RM detector).} The $1/\omega^2$ spectral weighting plus $T_s$
+factor and the $10^4$ multiplier are what make the RM threshold ladder a ladder in \textbf{Gauss of
+RMS $n{=}1$ field at the probes} rather than in arbitrary $\dot B$ units. The $\mathrm{ff}$
+normalization carries the window-power and FFT-length bookkeeping. If any of these are wrong the
+detector still works, but the thresholds lose their physical meaning and cannot be compared to
+published DIII-D numbers. Note also the caution in \code{test-mpxspec.py} about a possible scaling
+difference between PCS and standard-archive versions of the same signal.
+
+%------------------------------------------------------------------
+\subsection{Summary answer}
+%------------------------------------------------------------------
+
+\begin{center}
+\begin{tabular}{@{}p{0.15\textwidth}p{0.38\textwidth}p{0.40\textwidth}@{}}
+\toprule
+& \textbf{Hazard calibration} & \textbf{Magnetics compensation} \\
+\midrule
+\textbf{What} & Check that $\overline{E/C}$ per margin bin follows $\ln(1+e^{f})$ & Subtract modelled coil pickup; scale $\dot B$ spectra to absolute Gauss \\
+\textbf{Where} & \code{plot\_calibration}, \code{testcalib.py} & \code{blmEvents.py} + \code{cm\_2018.sav}; \code{modespyec.get\_amplitude} \\
+\textbf{Does} & Licenses reading the score as $h = \softplus(f)/\Delta$ & Removes non-plasma signal; fixes threshold units \\
+\textbf{For} & Survival curves, expected time-to-onset, hazard ratios, cross-run comparison & Preventing applied-field triggers; making thresholds physically meaningful \\
+\textbf{Applied?} & \textbf{No} --- diagnostic only, nothing is refit & \textbf{Yes} --- it modifies the data \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%==============================================================================
+\section{Porting to MAST-U}
+\label{sec:mastu}
+%==============================================================================
+
+\subsection{What transfers unchanged}
+
+The architecture, and it is the valuable part: threshold-ladder detectors; a joint annotation file
+as the single interface between detection and modeling; right-censored one-label-per-shot survival
+tables; logistic loss as the survival likelihood; base-rate anchoring; shot-disjoint nested
+resampling; and the softplus hazard link with its calibration check. None of this is DIII-D
+specific. Files \code{pathway\_utils.py}, \code{xgb\_hazard\_common.py}, \code{tabular\_limits.py},
+and the \code{plot\_calibration} routine are essentially machine-agnostic.
+
+\subsection{RM detector: the concrete change list}
+
+Working outward from \code{modespyec.py}, in rough order of how much damage a wrong choice does:
+
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{Probe list and toroidal angles} are hard-coded in
+\code{brm\_\bk events\_\bk modespyec.py}'s \code{\_\_main\_\_}, together with the \code{'d'} pointname
+suffix. Replace with a machine configuration. Note two structural assumptions in
+\code{summarize\_consecutive\_circular\_pairs}: the outboard angles must be sorted ascending
+(asserted), and the last channel is expected to be an \code{mpi11m*} probe that is required present
+but never used in the pairing --- with $N{+}1$ input channels only the first $N$ enter the
+$N$ wrapped consecutive pairs. Understand that before reusing the function.
+\item \textbf{Sample-rate gate.} \code{okTs} hard-asserts $5\,\mu$s $\pm 0.1\%$. This must become a
+parameter, and any resampling must happen before the FFT stage.
+\item \textbf{Window duration, not window length.} \code{blocksize}$=1024$ at $200$\,kHz is a
+$5.12$\,ms window with $2.56$\,ms stride. Preserve the \emph{duration} for a given MAST-U digitizer
+rate, not the sample count; this sets the frequency resolution $\Delta f \approx 195$\,Hz and
+therefore what counts as a resolvable rotating mode. MAST-U mode frequencies and pulse lengths
+differ from DIII-D, so this is a physics choice.
+\item \textbf{Threshold ladder range.} $1$--$30$\,G is set by DIII-D probe geometry and field
+levels. Re-derive the range from your own base-rate-versus-threshold curve
+(\code{brmEventsCounter.py} $\rightarrow$ \code{mergedEventsExtractPlot.py}) and place the ladder to
+bracket the knee. Do not import $5.0$\,G.
+\item \textbf{Coherence and integerness gates.} \code{coh-min}$=0.975$ and \code{eps-int}$=0.25$
+were tuned against DIII-D noise and a nine-pair array. With fewer probes or wider spacing the
+$\hat n$ estimate degrades and \code{eps-int} must widen --- at the cost of $n$-aliasing. Also check
+$\Delta\theta$ against the Nyquist limit in toroidal mode number for your array.
+\item \textbf{Robust trimming.} \code{trim-lo/hi}$=2$ assumes nine pairs (mean of the middle five).
+With a smaller array this discards too much; scale it or switch to a median.
+\item \textbf{Debounce.} $8$\,ms (RM) and $10$\,ms (LM) relative to DIII-D flat-tops of seconds.
+MAST-U pulses are shorter; re-express the debounce as a fraction of the analysis window or of the
+expected growth time.
+\item \textbf{Flat-top windowing.} \code{iptimestamp} thresholds --- $t_A > 0.40$\,s,
+$t_B > 1.00$\,s, $|\langle I_p\rangle| > 0.50$\,MA, the $500$\,ms smoothing boxcar, and the
+\code{t2ratio < 1.05} disruption heuristic --- are all DIII-D magnitudes and will silently reject
+most MAST-U pulses. This is the most likely cause of an unexpectedly empty results table, so
+validate it first, in isolation, on a handful of known shots.
+\item \textbf{Sawtooth/ELM rejection.} The ``plain'' detector's whole premise is that a high enough
+Gauss threshold excludes sawteeth without parity discrimination. That premise needs re-testing on
+MAST-U, where the ELM and fishbone signatures in midplane $\dot B$ differ. If the base-rate curve
+shows no clean knee, the older even/odd-parity approach in \code{mpxspec.py} becomes relevant again.
+\end{enumerate}
+
+\noindent
+Practical suggestion: \code{show\_brm\_detectors.py} and \code{show\_all\_detectors.py} exist to
+overlay detector variants on individual shots. Getting a MAST-U equivalent of those working on a
+dozen hand-picked pulses, \emph{before} launching any database-scale run, is the highest-value
+first step.
+
+\subsection{Downstream considerations}
+
+\begin{itemize}[leftmargin=2em]
+\item \textbf{No LM detector without an equivalent decomposition.} The LM branch depends on a PCS
+$M$-matrix and a saddle-loop/probe two-axis array. Absent a MAST-U analogue, the joint annotation
+degenerates to RM-only --- which \code{pathway\_utils} handles gracefully (\code{rotating-only} and
+\code{uneventful} pathways), but the pathway analysis and threshold plane collapse to one
+dimension. \code{eventPathway\bk Analysis\bk Plain.py} as written requires both CSVs and asserts on both;
+that is the code to adapt.
+\item \textbf{Equilibrium features.} MAST-U's reconstruction (EFIT++) exposes different node names
+and, importantly, a different slice cadence $\Delta$ --- see the $\Delta$ discussion in
+Section~\ref{sec:calib}. The dimensionless normalization scheme ($/R_0$, $\mu_0 I_p/B_{t0}a$,
+$\bar n/n_{\rm GW}$, $p/(B_{t0}^2/2\mu_0)$) is designed to be machine-transferable and should be
+kept. Spherical-tokamak aspect ratio pushes \code{aspr} well outside the DIII-D range, so any
+\code{--limits fixed} screening bounds must be re-derived; \code{--limits auto} (quantile-based) is
+the safer starting point.
+\item \textbf{The matched-pair machinery is optional.} \code{processEq\bk Descriptor\bk Pair.py} exists to
+compare two EFIT variants. With a single reconstruction, pass the same pickle as primary and
+secondary, or write a thinner flattener --- but keep \code{table\_stack}'s $40$\,ms event-proximity
+guard and its \code{lost\_events} count, which is a real data-quality signal.
+\item \textbf{Event counts drive everything.} With $B$ replicas over $K$ shot-disjoint folds and a
+base rate of order $10^{-3}$, the usable resolution of the calibration plot is set by the total
+event count, not the row count. Estimate $E$ early; it determines whether $40$ bins are defensible
+or whether the diagnostic must be coarsened.
+\end{itemize}
+
+%==============================================================================
+\section{The MAST-U implementation: audit and retrofit}
+\label{sec:mastuimpl}
+%==============================================================================
+
+Section~\ref{sec:mastu} is the generic change list. This section is an audit of the
+MAST-U code as it actually stands (\code{\textasciitilde/Dropbox/Python/MASTu}, with
+E.~Giovannozzi's analysis modules in \code{\textasciitilde/Dropbox/Python/Hazard/egio}),
+together with the retrofit applied to it.
+
+%------------------------------------------------------------------
+\subsection{Two mechanisms, first}
+%------------------------------------------------------------------
+
+Both appear repeatedly above and both are load-bearing, so they are set out plainly here.
+
+\subsubsection{The Schmitt trigger and its debounce}
+
+A plain comparator --- ``is the signal above the level?'' --- \emph{chatters}. When the
+signal sits near the threshold, noise flips the answer back and forth and a single
+physical excursion is reported as dozens of events. A \textbf{Schmitt trigger} is a
+comparator with memory. In its classical form it carries two levels: the output switches
+on at a high level and off at a lower one, so once triggered it cannot drop out until the
+signal has fallen well back. The gap between the two levels is called \emph{hysteresis}.
+
+The DIII-D detector (\code{event\_detector\_} in \code{modespyec.py}) sets both levels
+equal, so there is no hysteresis, and suppresses chatter a different way: with a
+\textbf{debounce}. The signal must remain above the level \emph{continuously} for
+$\tau_d$ before an event is declared --- $8$\,ms for the RM detector, $10$\,ms for the LM
+detector. A shorter excursion resets the clock and is discarded.
+
+The detail that matters is what happens next. Once confirmed, the reported event time is
+\emph{back-dated} by $\tau_d$, so the record holds the moment of first crossing, not the
+moment of confirmation:
+
+\begin{verbatim}
+    signal        /\  (3 ms spike, rejected)      _______________
+    ------------ /  \ --------------------------/                (sustained)
+    level  - - -/- - \- - - - - - - - - - - - -/- - - - - - - -
+                                               |<-- 8 ms -->|
+                                               ^
+                                    event time recorded HERE,
+                                    not at the end of the debounce
+\end{verbatim}
+
+The physical justification is that a tearing mode grows and persists, whereas a
+sawtooth crash, an ELM, or a digitizer glitch does not. Without the debounce the
+``event time'' is the arrival time of the first noise spike above threshold, which is a
+property of the noise, not of the plasma. Without the back-dating, every event time
+carries a fixed $+\tau_d$ bias --- harmless for a classifier, but not for a survival model
+whose whole content is \emph{when} things happen.
+
+\subsubsection{The coherence gate}
+
+A detector array sees a superposition of a coherent mode and incoherent noise. The
+coherence gate is the test that separates them, and it is what licenses calling an
+amplitude a mode amplitude.
+
+Take $N_c$ sensors at toroidal angles $\varphi_c$, and let $S_c(f,t)$ be the windowed
+Fourier transform of sensor $c$. A genuine mode of toroidal number $n$ appears at every
+sensor with the same amplitude and a phase fixed by position, $S_c \propto e^{i n \varphi_c}$.
+Removing that expected phase pattern and summing,
+\begin{equation}
+A_n(f,t) \;=\; \sum_{c=1}^{N_c} e^{-i n \varphi_c}\, S_c(f,t),
+\end{equation}
+gives two very different behaviours:
+\begin{itemize}[leftmargin=2em,noitemsep]
+\item \textbf{Coherent mode present.} Every term rotates into alignment and the sum adds
+constructively: $|A_n|^2 = N_c^2 |S|^2$.
+\item \textbf{Uncorrelated noise.} The phases are random, the sum is a random walk, and it
+grows only as $\sqrt{N_c}$: $\mathbb{E}|A_n|^2 \approx N_c \langle |S_c|^2\rangle$.
+\end{itemize}
+Normalising by the best case gives a dimensionless quality factor on $[0,1]$,
+\begin{equation}
+\gamma_n^2(f,t) \;=\; \frac{|A_n(f,t)|^2}{N_c^2\,\big\langle |S_c(f,t)|^2 \big\rangle_c}
+\qquad\longrightarrow\qquad
+\begin{cases}
+1 & \text{perfect $n$-mode},\\[2pt]
+1/N_c & \text{pure noise}.
+\end{cases}
+\label{eq:coh}
+\end{equation}
+This is the fraction of array power explained by that toroidal harmonic --- the difference
+between a crowd shouting a word in unison and the same crowd shouting at random.
+
+A \textbf{gate} is then simply a cutoff: any $(f,t)$ bin with $\gamma_n^2$ below the
+threshold contributes nothing to the amplitude sum. DIII-D applies two such gates
+together (Section~2.2): magnitude-squared coherence $C_{12} \ge 0.975$ between probe
+pairs, \emph{and} an integerness condition $\big|\,|\hat n| - |n|\,\big| \le 0.25$
+requiring the fitted mode number to be close to a whole number.
+
+The consequence of omitting the gate is not subtle. The mode number is assigned by an
+$\arg\max$ over candidate $n$, and an $\arg\max$ always returns something. Every noise bin
+is therefore labelled with some $n$ and admitted to the amplitude sum, and the resulting
+``mode amplitude'' tracks the noise floor.
+
+%------------------------------------------------------------------
+\subsection{Code inventory}
+%------------------------------------------------------------------
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.26\textwidth}>{\raggedright\arraybackslash}p{0.66\textwidth}@{}}
+\toprule
+\textbf{File} & \textbf{Role and state} \\
+\midrule
+\endhead
+\code{run\_master.py} & Intended top-level driver \\
+\code{saddle\_analysis.py} & OMAHA batch analysis; the source of \code{saddle\_analysis\_one\_shot} \\
+\code{run\_saddle\_analysis.py} & Earlier scratch version; contains a \code{load\_ohama\_slow} typo and mixed tabs/spaces, i.e.\ it does not parse. Dead. \\
+\code{flattop.py} & \emph{New} --- flat-top windowing \\
+\code{mag\_\bk perturbations\_\bk shots47000\_\bk 47099.pkl} & 78 shots of collected output \\
+\midrule
+\code{egio/saddle\_data.py} & Giovannozzi's MAST-U magnetics library: OMAHA loading, spectrogram, $n$-detection, amplitude extraction \\
+\code{egio/model\_saddle.py}, \code{egio/lazytraits.py} & Present but not on this path \\
+\bottomrule
+\end{longtable}
+
+\noindent
+Five of Giovannozzi's modules are Freya-only and absent locally: \code{omaha\_coils}
+(the coil table: toroidal angle, polarity, orientation, slow/fast channel names),
+\code{saddle\_geometry}, \code{mode\_functions} (\code{zeros\_spectrum}),
+\code{pickup\_coil\_data}, \code{sxr\_geometry}. \code{omaha\_coils} is the important one:
+it is the array geometry, and therefore the MAST-U counterpart of DIII-D's hard-coded
+probe angle list.
+
+%------------------------------------------------------------------
+\subsection{Empirical finding: the detector currently follows the noise floor}
+\label{sec:noisefloor}
+%------------------------------------------------------------------
+
+The collected pickle holds 78 shots (of 100 attempted, $47000$--$47099$), each with
+$779$ time slices per toroidal mode number, $n \in \{1,2,3,4\}$. Reading it back gives an
+unusually clean diagnosis.
+
+\paragraph{Time base.} Identical across all 78 shots: $t_0 = 1.122$\,ms,
+$t_{\rm end} = 996.962$\,ms, $\Delta t = 1.28$\,ms exactly, $779$ points. From
+$\Delta t = \code{NFFT}/2$ samples with \code{NFFT}$\,=512$, the OMAHA \emph{slow}
+channels digitise at
+\begin{equation}
+F_s = 200\ \text{kHz},
+\qquad
+\text{window} = 2.56\ \text{ms},
+\qquad
+\text{stride} = 1.28\ \text{ms},
+\qquad
+\Delta f = 391\ \text{Hz}.
+\end{equation}
+This is the same sample rate as the DIII-D midplane probes, so the window-duration
+reasoning of Section~\ref{sec:mastu} transfers directly. Note that \code{NFFT}$\,=512$
+gives exactly \emph{half} the DIII-D analysis window; \code{NFFT}$\,=1024$ would match it.
+
+\paragraph{The detector does not distinguish plasma from vacuum.} Comparing the $n=1$
+amplitude before breakdown against the same quantity during the flat-top, pooled over all
+78 shots:
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+$n=1$ amplitude, $t < 50$\,ms (no plasma) & $1.92\times10^{-7}$ \\
+$n=1$ amplitude, $0.2 < t < 0.8$\,s (flat-top) & $2.52\times10^{-7}$ \\
+\midrule
+ratio & $1.31$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A $31\%$ difference. Supporting evidence points the same way: \code{freq} is finite on
+$100\%$ of slices with a median of $14.2$\,kHz, i.e.\ a mode is reported at every instant
+of every shot including the vacuum phase, and the value is close to the centroid of the
+$[0.1, 50]$\,kHz search band --- the signature of a broadband noise spectrum, not a mode.
+
+\paragraph{Cause.} In \code{saddle\_data.py}, \code{Spectra.n\_detection} computes
+precisely the coherence of Eq.~\eqref{eq:coh},
+\begin{verbatim}
+    coherence = np.abs(ap_sp) ** 2 / self.phi.size ** 2 / power
+\end{verbatim}
+and \code{RecognizedModes.threshold()} exists to gate on it. But
+\code{RecognizedModes.amplitude()} never calls either. The only mask applied is
+\code{Ntor != sel.ntor}, which is the $\arg\max$ assignment --- and the one line that could
+have rejected weak samples,
+\begin{verbatim}
+    Fa[Bp < amplitude_selector.v_min] = np.nan
+\end{verbatim}
+is inert because the driver passes \code{v\_min}$\,=0.0$. Nothing is ever rejected. The
+pipeline as it stands is a spectral summary, not a detector.
+
+\paragraph{Consequence for the locked-mode labels.} \code{LM\_labels = (freq < 2000)}
+fires on $0.44\%$ of $n=1$ slices ($0.06\%$, $0.04\%$, $0.19\%$ for $n=2,3,4$), with no
+amplitude and no coherence condition. These are slices where the noise centroid happened
+to dip below $2$\,kHz. There is a second, deeper problem: the amplitude search band starts
+at $100$\,Hz, so a genuinely locked mode --- for which $f \to 0$ --- falls \emph{below} the
+band and vanishes rather than being labelled. DIII-D uses an entirely separate, non-spectral
+path for locked modes (the $M$-matrix decomposition of Section~2.3) for exactly this
+reason. A frequency cut on a spectral detector is not a substitute for a locked-mode
+detector.
+
+%------------------------------------------------------------------
+\subsection{Structural defects in the driver}
+%------------------------------------------------------------------
+
+Independently of the physics, \code{run\_master.py} could not run:
+
+\begin{enumerate}[leftmargin=2em,noitemsep]
+\item \code{saddle\_analysis.py} executed its 100-shot \code{pyuda} scrape \emph{at module
+level}, so \code{from saddle\_analysis import saddle\_analysis\_one\_shot} triggered a full
+database sweep and a pickle write on import.
+\item \code{run\_master} called \code{build\_rm\_detector()} and \code{build\_client()};
+neither exists anywhere in the codebase.
+\item \code{collect\_signals} read \code{n\_tor\_max}, \code{NFFT}, \code{SaddleFeats} and
+\code{client} as globals that were never in scope, and returned bare \code{None}. It was
+never called.
+\item \code{ntor = np.arange(n\_tor\_max)} starts at $0$. The $n=0$ component is
+axisymmetric and carries no mode information.
+\item \code{saddle\_analysis\_one\_shot} read \code{time\_interval}, \code{freq\_min} and
+\code{freq\_max} as module globals. Their values differ between the two scripts
+($f_{\min} = 100$\,Hz versus $1$\,kHz), which silently changes what counts as locked.
+\item The batch loop caught every exception and \code{pass}ed, so the 22 missing shots
+carry no record of why they were dropped.
+\end{enumerate}
+
+Two further bugs live in \code{saddle\_data.load\_omaha} and \code{load\_base} and should be
+fixed at the source: the \code{except} clause resets \code{time} and \code{data} to empty
+arrays, so a single failing channel destroys everything already loaded; and
+\code{idt = np.flatnonzero(np.diff(time) < 1e-4)} is then used only as
+\code{time[idt[0]:idt[-1]]}, which discards the mask and takes a contiguous slice instead.
+The commented-out uniform-$\Delta t$ assertion in \code{SaddleFull.spectrum} suggests these
+were workarounds for irregular time bases --- worth understanding before trusting the FFT
+stage.
+
+%------------------------------------------------------------------
+\subsection{The retrofit}
+%------------------------------------------------------------------
+
+\paragraph{\code{flattop.py} (new).} The \code{iptimestamp.py} analogue, which had been a
+\code{\# timeFT = \bk find\_flattop(shot, Ip)} placeholder. It reproduces the DIII-D
+four-timestamp construction --- smooth $I_p$, differentiate, locate the extreme ramp rates,
+back-track to where the rate falls below $\alpha$ of the extremum --- with every machine
+constant factored into a \code{FlatTopConfig} dataclass ($30$\,ms smoothing rather than
+$500$\,ms, $|\langle I_p\rangle| > 50$\,kA rather than $0.5$\,MA, and so on). It returns
+the window together with the flat-top quality metrics (linear-fit slope, normalised RMSE)
+and, on failure, a string saying which test rejected the shot. The DIII-D disruption
+heuristic (\code{t2ratio}) is carried over.
+
+\paragraph{\code{saddle\_analysis.py} (repaired, not rewritten).} The original routine with
+four defects fixed and nothing else touched. The signature
+\code{saddle\_analysis\_one\_shot(shot, NFFT, ntor, SaddleDict)} is unchanged, the output
+keys are unchanged, and the pickle layout \code{\{shot: \{n: \{...\}\}\}} is unchanged, so
+existing readers and existing \code{.pkl} files keep working. The four repairs:
+\begin{enumerate}[leftmargin=2em,noitemsep]
+\item the batch driver moves under \code{if \_\_name\_\_ == "\_\_main\_\_"}, so importing the
+module no longer triggers a database sweep;
+\item \code{time\_interval}, \code{freq\_min} and \code{freq\_max} become optional keyword
+arguments \emph{after} the original four positionals --- they were module globals read from
+inside the function, so any import-and-call raised \code{NameError};
+\item drop reasons are written to a \code{.dropped.json} sidecar rather than swallowed by
+\code{except: pass}, leaving the pickle format untouched;
+\item a dead \code{amp = modes[itor].amplitude} is removed.
+\end{enumerate}
+
+\paragraph{\code{saddle\_extras.py} (new).} Everything genuinely new lives here, so that the
+original routine above stays independently testable. It provides
+\code{amplitude\_with\_coherence()}, which mirrors Giovannozzi's \code{amplitude()} exactly
+for amplitude and frequency but additionally reduces \code{rm.coherence} over the same
+time/frequency selection and $n$-mask,
+\begin{equation}
+\bar\gamma_n^2(t) \;=\; \frac{\sum_f \gamma_n^2(f,t)\,P(f,t)}{\sum_f P(f,t)}
+\qquad \text{(power-weighted over the surviving bins)},
+\end{equation}
+so that \emph{every amplitude sample now carries the quality of the toroidal fit that
+produced it} and the gate of Section~\ref{sec:noisefloor} can be applied downstream. It also
+provides \code{noise\_floor()} and the enriched per-shot entry point \code{analyze\_shot()},
+which returns \code{(per\_n, meta)} as a tuple rather than mixing a string key into an
+integer-keyed dictionary.
+
+\paragraph{\code{run\_master.py} (reworked).} \code{collect\_signals()} becomes the real
+per-shot entry point: it fetches $I_p$, derives the flat-top window, runs the OMAHA
+analysis, builds a normalised and coherence-gated detector trace per $n$, and gathers the
+auxiliary signals. \code{build\_rm\_detector()} then runs the threshold ladder over a shot
+list and writes the ladder table --- the direct analogue of
+\code{fdp-\bk regen-\bk brm-\bk plain-\bk *.csv} --- with one column per level holding the
+first crossing time and \code{NaN} where the level was never crossed. The trigger,
+\code{schmitt\_first\_crossing()}, implements the debounce and back-dating described above.
+
+\paragraph{The per-shot noise floor.} MAST-U offers something DIII-D does not. The OMAHA
+record opens at $\approx 1$\,ms, well before breakdown, so every shot carries $\sim 39$
+slices of genuine no-plasma baseline. This matters because the per-shot median amplitude
+varies by a factor of $9.7$ across the 78 shots --- a fixed absolute ladder would be
+dominated by shot-to-shot variation in the noise floor rather than by plasma behaviour.
+The ladder is therefore currently defined in units of each shot's own pre-plasma floor,
+\begin{equation}
+\text{SNR}(t) = \frac{A_{n}(t)}{\operatorname{median}\big(A_n(t < 20\,\mathrm{ms})\big)},
+\end{equation}
+which should be replaced by an absolute ladder once the calibration below is settled.
+
+%------------------------------------------------------------------
+\subsection{Offline validation, and a handedness trap}
+\label{sec:handed}
+%------------------------------------------------------------------
+
+\code{amplitude\_with\_coherence()} duplicates roughly twenty-five lines of upstream code,
+which is the kind of change that should not be trusted on a reading. It was therefore
+exercised offline against Giovannozzi's \emph{actual} \code{SaddleFull}, \code{Spectra} and
+\code{RecognizedModes} classes, with the Freya-only modules stubbed, on synthetic data:
+eight coils at $200$\,kHz, white noise throughout, and an $n=2$ mode at $10$\,kHz switched
+on at $t = 0.15$\,s. Three things were confirmed:
+
+\begin{itemize}[leftmargin=2em,noitemsep]
+\item \code{rm.coherence} has shape $(n_{\rm searched}, n_f, n_t)$, so the index expression
+\code{rm.coherence[i].T[:, idf][idt, :]} is correct;
+\item the returned amplitude and frequency are \textbf{bit-identical} to
+\code{RecognizedModes.amplitude()} for every $n$;
+\item in the mode window the coherence for the injected $n$ reaches $0.9994$ against a
+measured noise floor of $\approx 0.25$, while every other $n$ stays at the floor.
+\end{itemize}
+
+\noindent
+Two numbers from that test are worth keeping. The measured pure-noise coherence floor sat
+near $2/N_c$ rather than the theoretical $1/N_c$, so a gate should be set from the measured
+distribution and not from theory; with a floor of $0.25$ and a genuine mode near $1.0$,
+anything in $0.5$--$0.7$ separates cleanly.
+
+\paragraph{The handedness trap.} The first run of this test produced the coherence
+\emph{backwards} --- it fell in the mode window instead of rising. The cause is a phase
+convention. \code{Spectra.n\_detection} builds the projection
+\begin{verbatim}
+    ap = np.exp(1j * np.radians(phi) * ntor[:, None])
+\end{verbatim}
+that is, it projects onto $e^{+i n \varphi}$ and therefore detects modes whose spectral
+phase runs as $e^{-i n \varphi}$. A mode of the opposite handedness is invisible to a
+positive-only search list. Repeating the test with the sign of the injected toroidal phase
+flipped:
+
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+injected mode & coherence at $n=2$ & amplitude ratio (mode/noise) \\
+\midrule
+$\sin(\omega t - n\varphi)$ \quad(matches convention) & $0.9994$ & $99.5$ \\
+$\sin(\omega t + n\varphi)$ \quad(opposite)           & $0.0092$ & $13.4$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The second row is the important one. The coherence correctly collapses --- but the
+\emph{ungated} amplitude still rises by a factor of $10$--$17$ for \textbf{every} $n$
+simultaneously. A mode of the wrong handedness does not merely go undetected: it inflates
+the reported amplitude of all four toroidal numbers at once. That is exactly the false
+positive the gate exists to remove, and it is a second, independent route to the noise-following
+behaviour of Section~\ref{sec:noisefloor}.
+
+Which handedness a real mode carries depends on the toroidal rotation direction and hence
+on the signs of $I_p$ and $B_t$. DIII-D handles this explicitly: the locked-mode detector
+branches on $\operatorname{sign}(\langle B_t\rangle \langle I_p\rangle)$ to select
+\code{MmatrixRH} or \code{MmatrixLH} (Section~2.3). The MAST-U path has no such branch and
+\code{ntor = [1,2,3,4]} is one-sided. Until the convention has been checked against a shot
+with a known mode, both signs should be searched --- \code{saddle\_extras.NTOR\_BOTH\_SIGNS}
+--- and the half carrying the coherence identified. If the campaign runs a single $I_p$/$B_t$
+polarity this reduces to a one-off determination; if both polarities appear in the database,
+it must be resolved per shot, exactly as DIII-D does.
+
+%------------------------------------------------------------------
+\subsection{The workflow as it now stands}
+%------------------------------------------------------------------
+
+All modules live in \code{\textasciitilde/Dropbox/Python/Hazard}, alongside
+\code{egio/saddle\_data.py}. The call graph for one shot:
+
+\begin{small}
+\begin{verbatim}
+run_master.main()
+  argparse --> run_master(shots, build_detector, thresholds, ...)
+    pyuda.Client()
+    build_rm_detector(shots, client, ladder, ...)
+      |
+      for each shot:
+      |
+      +-- collect_signals(shot, client, ...)          [run_master.py]
+      |     |
+      |     +-- client.get("/AMC/PLASMA_CURRENT")     measured Ip, kA -> MA
+      |     +-- flattop.find_flattop(t, ip, cfg)      --> FlatTop(ok, t_a, t_b,
+      |     |                                              ip_mean, slope, nrmse,
+      |     |                                              reason)
+      |     |     drops the shot if any window test fails
+      |     |
+      |     +-- saddle_extras.analyze_shot(shot, NFFT, ntor)
+      |     |     +-- saddle_data.load_omaha_slow(shot)      --> SaddleFull
+      |     |     +-- SaddleFull.spectrum(NFFT)              --> Spectra
+      |     |     +-- Spectra.n_detection(ntor)              --> RecognizedModes
+      |     |     +-- for each n:
+      |     |           saddle_extras.amplitude_with_coherence(rm, sel)
+      |     |             --> (time, freq, Bp, Ba, coh)
+      |     |           saddle_extras.noise_floor(time, Ba, t_pre)
+      |     |     returns (per_n, meta)
+      |     |
+      |     +-- build detector trace per n:
+      |     |       snr = amp / noise_floor
+      |     |       snr[coherence < coherence_min] = NaN      <-- the gate
+      |     |       restrict to [t_a, t_b]
+      |     |
+      |     +-- _grab(): XIM/DA/HM10/T, ANE/DENSITY (+dne_dt), AYC/T_E
+      |     |
+      |     returns {ok, reason, tsof, teof, ip_mean, ft_nrmse,
+      |              traces{n: {time, snr, coherence, floor}}, modes, meta, aux}
+      |
+      +-- detect_ladder(sig, ladder, n_detect, debounce)
+            for each level:
+              schmitt_first_crossing(time, snr, level, debounce)
+                --> first crossing time, back-dated; NaN if never crossed
+      |
+      one row per shot: shot, isok_rm, whichn, ta_rm, tb_rm, ip_mean,
+                        ft_nrmse, floor, rm2.0000, rm2.2500, ... rm30.0000
+  --> DataFrame.to_csv(out_csv)
+\end{verbatim}
+\end{small}
+
+\noindent
+The CSV is the MAST-U analogue of \code{fdp-\bk regen-\bk brm-\bk plain-\bk *.csv} and is
+where this pipeline currently ends. The next stage --- feeding it, with a locked-mode
+counterpart, into the joint annotation of Section~3 --- is not yet written.
+
+\medskip
+\noindent Two independent entry points exist alongside the driver:
+
+\begin{itemize}[leftmargin=2em]
+\item \code{python saddle\_analysis.py \bk --shot-min 47000 \bk --shot-max 47100} reproduces the
+original batch sweep (unchanged output format, plus the \code{.dropped.json} sidecar).
+\item \code{python check\_\bk equivalence.py --shot 47000} asserts on real data that
+\code{amplitude\_\bk with\_\bk coherence} still matches \code{Recognized\bk Modes.\bk amplitude()}, prints
+the array geometry and sample rate, and reports the coherence distribution against $1/N_c$.
+This is the first thing to run on Freya.
+\end{itemize}
+
+%------------------------------------------------------------------
+\subsection{Base rate versus threshold on the existing data}
+%------------------------------------------------------------------
+
+Running the retrofitted trigger over the 78 collected shots ($70.1$\,s of total dwell,
+$n=1$, $8$\,ms debounce, crude $[0.05, 0.95]$\,s window standing in for the flat-top)
+reproduces the DIII-D screening diagnostic of Section~2.4:
+
+\begin{center}
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+SNR level & events & fraction of shots & base hazard [s$^{-1}$] \\
+\midrule
+ 2.0 & 61 & 0.782 & 0.870 \\
+ 3.0 & 54 & 0.692 & 0.771 \\
+ 4.0 & 49 & 0.628 & 0.699 \\
+ 5.0 & 47 & 0.603 & 0.671 \\
+ 7.0 & 41 & 0.526 & 0.585 \\
+10.0 & 19 & 0.244 & 0.271 \\
+15.0 &  5 & 0.064 & 0.071 \\
+20.0 &  0 & 0.000 & 0.000 \\
+30.0 &  0 & 0.000 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+There is a knee between SNR $\approx 7$ and $15$, which is the encouraging part: noise-floor
+normalisation alone already yields a usable ladder. The rates are roughly five times the
+DIII-D base rate, consistent with an ungated detector still counting noise excursions. The
+correct next measurement is to repeat this table with the coherence gate active and check
+whether the knee sharpens --- exactly the ``validate the base-rate curve first'' advice of
+Section~\ref{sec:mastu}.
+
+%------------------------------------------------------------------
+\subsection{Calibration, in the MAST-U context}
+%------------------------------------------------------------------
+
+Section~\ref{sec:calib} distinguished the statistical hazard calibration from the hardware
+magnetics calibration. On MAST-U the hardware side is not yet done, and the code says so.
+In \code{RecognizedModes.amplitude}:
+\begin{verbatim}
+    Ba = Bp/Fa/2/np.pi # TODO check
+\end{verbatim}
+
+That comment is the whole issue. \code{Bp} $= \sqrt{\sum_f P(f,t)}$ comes from
+\code{matplotlib.\bk mlab.\bk specgram(\bk mode='complex')}, which applies \textbf{no} window-power or
+sample-rate normalisation, and no coil area or amplifier gain has been divided out. The
+DIII-D counterpart carries an explicit normalisation $\mathrm{ff} = 2/(p_w\, n_b\, n_{\rm fft})$,
+a factor $T_s$, and a final $\times 10^4$ that lands the result in Gauss. The MAST-U number
+lands at $\sim\!2.3\times10^{-7}$ of nothing in particular.
+
+There is also a formula difference worth recording. DIII-D weights each frequency bin by
+$1/\omega^2$ \emph{inside} the sum,
+\begin{equation}
+A^{\rm D3D}_n = \sqrt{\sum_f \Big(\tfrac{1}{\omega_f}\Big)^{\!2}\,\tfrac{1}{2}\big(X_{11}+X_{22}\big)\,\mathrm{ff}},
+\end{equation}
+whereas the MAST-U code divides the band total by the power-weighted centroid,
+\begin{equation}
+A^{\rm MU}_n = \frac{\sqrt{\sum_f P(f,t)}}{2\pi F_a},
+\qquad
+F_a = \frac{\sum_f f\,P(f,t)}{\sum_f P(f,t)} .
+\end{equation}
+These agree for a narrowband mode, where $P$ is concentrated near $F_a$, and diverge for a
+broad or noisy spectrum --- which, by Section~\ref{sec:noisefloor}, is the present regime.
+
+Two consequences follow. Until the normalisation is settled, thresholds cannot be quoted as
+fields and cannot be compared against any published MAST-U or DIII-D number; and the
+statistical calibration of Section~\ref{sec:calib} is untouched by all of this but inherits
+its own MAST-U parameter, the EFIT++ slice interval $\Delta$, which must be measured before
+any hazard is quoted in s$^{-1}$.
+
+%------------------------------------------------------------------
+\subsection{Stage-by-stage status}
+%------------------------------------------------------------------
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.30\textwidth}>{\raggedright\arraybackslash}p{0.60\textwidth}@{}}
+\toprule
+\textbf{Stage} & \textbf{MAST-U status} \\
+\midrule
+Flat-top window & was absent; now written, needs validation on real $I_p$ traces \\
+RM spectral core & present, and arguably better than DIII-D: a global toroidal fit over the whole array rather than pairwise cross-spectra \\
+Coherence gate & computed but discarded; now plumbed through and validated offline (Section~\ref{sec:handed}) \\
+Absolute calibration & missing entirely \\
+Threshold ladder & was absent; now written \\
+LM detector & no counterpart exists \\
+Joint annotation & not started \\
+EFIT (EPM/EPQ) features & not started --- EPM is touched only for a max-$I_p$ cut \\
+Matched-pair merge & not started \\
+Hazard model & not started \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Three findings work in your favour. The OMAHA slow channels digitise at $200$\,kHz,
+\emph{identical} to the DIII-D midplane probes, so the window-duration argument transfers
+without rescaling. \code{saddle\_data.load\_betan} tries \code{/epq/} and falls back to
+\code{/epm/}, which means \textbf{EPQ and EPM are the MAST-U counterparts of EFIT02 and
+EFIT01} --- the matched-time-base study of Section~4 maps over intact, and the $\pm5$\,ms
+matching logic can be reused as written. And the free pre-plasma baseline described above
+has no DIII-D equivalent.
+
+%------------------------------------------------------------------
+\subsection{Immediate next steps}
+%------------------------------------------------------------------
+
+\begin{enumerate}[leftmargin=2em]
+\item Retrieve \code{omaha\_coils.py} from Freya --- the coil table is the array geometry
+and nothing can be validated without it --- together with \code{saddle\_geometry},
+\code{mode\_functions}, \code{pickup\_coil\_data} and \code{sxr\_geometry}.
+\item Validate \code{find\_flattop} on a dozen hand-picked pulses in isolation, before any
+database-scale run. Mis-set flat-top constants are the most likely cause of an
+unexpectedly empty results table.
+\item Settle the toroidal handedness (Section~\ref{sec:handed}) by searching both signs on
+a shot with a known mode. Until this is known, a null result from
+\code{ntor = [1,2,3,4]} cannot be distinguished from a mode of the opposite sense.
+\item Re-run the base-rate table with \code{--coherence-min} active and see whether the
+knee sharpens. This is the single measurement that will tell you whether the detector has
+become a detector.
+\item Settle the amplitude normalisation, so the ladder can be expressed in Gauss.
+\item Decide the locked-mode question. This is the real fork: without an $M$-matrix
+analogue the pathway model of Section~3.2 degenerates to \code{rotating-only} and
+\code{uneventful}, which is workable but discards the RM$\to$LM ordering that motivates the
+two-detector design.
+\end{enumerate}
+
+%==============================================================================
+\section{File map}
+%==============================================================================
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.30\textwidth}>{\raggedright\arraybackslash}p{0.62\textwidth}@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\endhead
+\code{fdp-run-study-plain.sh} & Top-level driver; threshold pinning, MD5 watermarking, stage sequencing, ML job submission \\
+\code{fdp-\bk regen-\bk brm-\bk blm-\bk plain.sh} & Upstream detector regeneration (RM plain + classic, LM compensated + uncompensated) \\
+\midrule
+\code{iptimestamp.py} & Flat-top window and flat-top quality metrics from $I_p$ \\
+\code{modespyec.py} & RM core: sliding cross-spectra, coherence, $n$-number, integrated Gauss amplitude, Schmitt/debounce trigger \\
+\code{brm\_\bk events\_\bk modespyec.py} & \code{toksearch} pipeline and results tabulation for the RM ladder \\
+\code{mpxspec.py} & Legacy even/odd-parity RM detector; also supplies \code{auxParseSingleTrace} \\
+\code{blmEvents.py} & LM detector: $M$-matrix decomposition, coil compensation, dynamic rebaselining, LM ladder \\
+\code{brmEventsCounter.py}, \code{blmEventsCounter.py} & Ladder $\rightarrow$ (threshold, counts, dwell, base hazard) \\
+\code{show\_brm\_detectors.py}, \code{show\_all\_detectors.py} & Per-shot visual comparison of detector variants \\
+\midrule
+\code{pathway\_utils.py} & Pathway taxonomy; Markov dwell/jump/rate accumulator; profiled log-likelihood \\
+\code{eventPathway\bk Analysis\bk Plain.py} & Join detectors; write joint annotation CSV; compute the threshold-plane surface \\
+\code{checkPathwayPickle.py} & Render the threshold plane: likelihood, pathway fractions, dwell, rates, contours \\
+\midrule
+\code{extractEqDescriptor.py} & EFIT descriptor harvest per tag \\
+\code{extractEqProfiles.py} & \code{pres}/\code{qpsi} profile featurization \\
+\code{processEq\bk Descriptor\bk Pair.py} & $\pm5$\,ms time matching of EFIT02 onto EFIT01; flattening; label placement \\
+\code{tabular\_limits.py} & Fixed and quantile screening limits \\
+\code{scratch.py} & Annotation index, pickle IO, key-respecting split primitives \\
+\midrule
+\code{xgb\_hazard\_common.py} & Custom objective; base-rate anchoring; shot-respecting CV; outer-fold predictions; elimination paths; KL feature distances \\
+\code{xgbDescriptorModel.py} & Main modeling program; \code{plot\_calibration}; SHAP, partial dependence, per-shot traces \\
+\code{fdp-\bk run-\bk study-\bk xgb-\bk \{ensembles,\bk outerpreds,\bk pooled,\bk named\}.sh} & \code{sbatch} wrappers for the four experiment suites \\
+\code{testcalib.py} & Standalone calibration, cumulative hazard, hazard-ratio and per-shot trace plots \\
+\code{test\_beta\_prior.py} & Bayesian/bootstrap calibration histograms (PCLR model) \\
+\code{xgbShowElimination.py}, \code{xgbShowLinkage.py} & Post-processing of elimination paths and feature linkage \\
+\midrule
+\multicolumn{2}{@{}l}{\textbf{MAST-U side} (\code{\textasciitilde/Dropbox/Python/Hazard})} \\
+\midrule
+\code{run\_master.py} & Driver: \code{collect\_signals} per shot, \code{detect\_ladder} / \code{build\_rm\_detector}, \code{schmitt\_first\_crossing}, CSV output \\
+\code{saddle\_analysis.py} & Original OMAHA routine, four defects repaired; \code{saddle\_analysis\_one\_shot}, \code{run\_batch} \\
+\code{saddle\_extras.py} & Additions: \code{amplitude\_with\_coherence}, \code{noise\_floor}, \code{analyze\_shot}, \code{NTOR\_BOTH\_SIGNS} \\
+\code{flattop.py} & Flat-top window and quality metrics from $I_p$ (the \code{iptimestamp.py} analogue) \\
+\code{check\_equivalence.py} & Asserts the reimplementation still matches upstream on real data \\
+\code{egio/saddle\_data.py} & Giovannozzi's magnetics library: OMAHA loading, spectrogram, $n$-detection, amplitude \\
+\bottomrule
+\end{longtable}
+
+\end{document}

@@ -1,0 +1,9 @@
+# Offline test suite and the analysis modules
+numpy
+scipy
+pandas
+matplotlib
+xarray
+
+# Freya only -- MAST-U data access, not installable from PyPI.
+# pyuda
