@@ -8,8 +8,13 @@ Two numbers decide it, and both are properties of your array and your data:
   the OBSERVED DISTRIBUTION -- what the real shots actually reach.  A gate
       above the bulk of this rejects everything.
 
-The gate belongs between them.  This script prints both, plus the fraction of
-slices surviving each candidate gate, over as many shots as you give it.
+The gate belongs between them.
+
+NOTE the gate acts PER FREQUENCY BIN, inside the amplitude sum, so that is the
+distribution reported here -- not the per-slice power-weighted value.  What
+matters most is the last column: the fraction of summed POWER that survives.
+A gate that works removes many noise bins while keeping the power, because the
+bins carrying a real mode are the coherent ones.
 
     python coherence_survey.py --shot-min 47000 --shot-max 47020
 """
@@ -20,8 +25,7 @@ import numpy as np
 import giopath  # noqa: F401
 
 try:
-    from saddle_data import load_omaha_slow, AmplitudeSelector
-    from saddle_extras import amplitude_with_coherence
+    from saddle_data import load_omaha_slow
     from saddle_analysis import NTOR_DEFAULT, TIME_INTERVAL_DEFAULT, \
         FMIN_DEFAULT, FMAX_DEFAULT
 except ImportError:
@@ -64,11 +68,7 @@ def main():
     a = p.parse_args()
     shots = a.shots or list(range(a.shot_min, a.shot_max))
 
-    ti = TIME_INTERVAL_DEFAULT
-    sel_kw = dict(time=ti, f_min=np.array([FMIN_DEFAULT] * len(ti)),
-                  f_max=np.array([FMAX_DEFAULT] * len(ti)), v_min=0.0)
-
-    pooled, per_n, phi, nshot = [], {int(n): [] for n in a.n_tor}, None, 0
+    pooled, pw, per_n, phi, nshot = [], [], {int(n): [] for n in a.n_tor}, None, 0
     for shot in shots:
         try:
             sd = load_omaha_slow(shot)
@@ -77,13 +77,22 @@ def main():
             rm = sd.spectrum(a.nfft).n_detection(np.asarray(a.n_tor))
             if phi is None:
                 phi = np.asarray(sd.phi, float)
-            for n in a.n_tor:
-                _, _, _, _, coh = amplitude_with_coherence(
-                    rm, AmplitudeSelector(ntor=int(n), **sel_kw))
-                c = coh[np.isfinite(coh)]
-                if c.size:
-                    pooled.append(c)
-                    per_n[int(n)].append(c)
+            F = rm.freq
+            idf = (F >= FMIN_DEFAULT) & (F <= FMAX_DEFAULT)
+            idf[0] = idf[-1] = False
+            for i, n in enumerate(a.n_tor):
+                # the bins this n actually claimed, in band -- exactly the set
+                # the amplitude sums over, and exactly what the gate filters
+                m = (rm.ntor.astype(int) == int(n)) & idf[:, None]
+                if not m.any():
+                    continue
+                c = rm.coherence[i][m]
+                p_ = rm.power[m]
+                good = np.isfinite(c) & np.isfinite(p_)
+                if good.any():
+                    pooled.append(c[good])
+                    pw.append(np.column_stack([c[good], p_[good]]))
+                    per_n[int(n)].append(c[good])
             nshot += 1
         except Exception as e:
             print(f"  skip {shot}: {type(e).__name__}: {e}")
@@ -92,7 +101,7 @@ def main():
         print("no coherence data")
         return 1
     obs = np.concatenate(pooled)
-    print(f"\n{nshot} shots, {obs.size} coherence samples, "
+    print(f"\n{nshot} shots, {obs.size} in-band bins, "
           f"{phi.size} coils at phi = {np.round(phi,1)}")
 
     sim = simulate_floor(phi, a.n_tor)
@@ -106,25 +115,32 @@ def main():
     print("  " + "  ".join(f"p{q}={np.percentile(obs,q):.3f}"
                            for q in [50, 90, 99, 99.9]) + f"   max={obs.max():.3f}")
 
-    print(f"\n{'gate':>6} {'survive':>8} {'noise thru':>11}   verdict")
+    CP = np.concatenate(pw, axis=0)
+    tot_p = CP[:, 1].sum()
+    print(f"\n{'gate':>6} {'bins kept':>10} {'power kept':>11} {'noise thru':>11}"
+          f"   verdict")
     for g in GATES:
         keep = float((obs >= g).mean())
+        pkeep = float(CP[CP[:, 0] >= g, 1].sum() / tot_p) if tot_p > 0 else 0.0
         leak = float((sim >= g).mean())
         if keep == 0:
             v = "rejects everything"
         elif leak > 0.05:
             v = "below the noise floor -- gates nothing"
-        elif keep < 1e-4:
-            v = "almost everything rejected"
+        elif pkeep < 0.02:
+            v = "throws away the power too"
         else:
             v = "USABLE"
-        print(f"  {g:4.2f} {100*keep:7.3f}% {100*leak:10.3f}%   {v}")
-    print("\n  survive   = fraction of real slices passing the gate")
-    print("  noise thru = fraction of pure-noise slices passing it")
-    print("  Pick the lowest gate whose noise leakage is negligible and which"
-          "\n  still passes enough real slices to populate the ladder.")
+        print(f"  {g:4.2f} {100*keep:9.3f}% {100*pkeep:10.3f}% {100*leak:10.3f}%"
+              f"   {v}")
+    print("\n  bins kept  = fraction of in-band bins passing the gate")
+    print("  power kept = fraction of SUMMED POWER passing it  <-- the one to watch")
+    print("  noise thru = fraction of pure-noise bins passing it")
+    print("\n  A working gate drops most BINS while keeping most POWER: the bins")
+    print("  carrying a real mode are the coherent ones.  If power falls as fast")
+    print("  as bins, there is no coherent population to separate.")
 
-    print(f"\n{'n':>4} {'median':>8} {'p99':>8} {'max':>8}")
+    print(f"\nper n (per-bin coherence)\n{'n':>4} {'median':>8} {'p99':>8} {'max':>8}")
     for n in sorted(per_n):
         if per_n[n]:
             c = np.concatenate(per_n[n])
