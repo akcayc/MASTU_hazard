@@ -123,11 +123,19 @@ a threshold cannot be quoted as a field or compared against DIII-D. `specgram`
 also applies no window-power or sample-rate normalisation, so an O(1) factor is
 unaccounted for on top.
 
-A consequence worth deciding deliberately: because cross-shot comparison *is*
-valid, the per-shot noise-floor normalisation is a choice rather than a
-necessity. If the instrument gain is stable between shots, dividing by each
-shot's own floor removes real variation. Both are stored (`amp` and
-`noise_floor`), so the ladder can be run either way.
+The ladder is therefore **absolute**, in the amplitude's own units. An earlier
+version divided by each shot's pre-plasma floor, justified by a ~10x spread in
+per-shot median amplitude — but that was measured over the whole record, plasma
+included. Measured where there is no plasma (t < 20 ms, instrumental by
+construction) the floor varies by only **1.88x** across shots 47000-47099,
+12% rel. std dev, with no shot above 3x the median. The factor of ten was
+physics, and dividing it out removed the cross-shot variation the hazard model
+learns from.
+
+A fixed absolute level is a consistent criterion to ~12%; a fixed
+signal-to-floor level would vary by 1.88x in absolute terms. `--normalize-floor`
+restores the old behaviour for comparison, and the `floor` column is written
+either way.
 
 **Toroidal handedness.** `Spectra.n_detection` projects onto `exp(+i n phi)`,
 so it detects modes whose spectral phase runs as `exp(-i n phi)`. A mode of the

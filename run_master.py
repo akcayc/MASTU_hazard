@@ -47,12 +47,33 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# threshold ladder.  Amplitudes are currently uncalibrated, and the per-shot
-# noise floor varies by ~10x across shots, so the ladder is defined in units of
-# the shot's own pre-plasma floor rather than in Gauss.  Replace with an
-# absolute ladder once the calibration is settled.
+# Threshold ladder, in the amplitude's own units.
+#
+# An earlier version normalised by each shot's pre-plasma floor, on the
+# grounds that the per-shot median amplitude varied by ~10x.  That was
+# measured over the whole record, which contains the plasma.  Measured where
+# there IS no plasma -- t < 20 ms, so instrumental by construction -- the
+# floor varies by only 1.88x across the 78 shots of 47000-47099 (12% rel.
+# std dev, no shot above 3x the median).  The factor of ten was physics.
+#
+# So the threshold is absolute.  A fixed absolute level is then a consistent
+# criterion to ~12%, whereas a fixed signal-to-floor level would vary by
+# 1.88x in absolute terms -- inconsistent in the direction that matters, and
+# it would divide out the cross-shot variation the hazard model learns from.
+#
+# Units are those of ModeAmplitude.amplitude, nominally tesla.  Giovannozzi:
+# "I'm saying T and T/s but, really, I'm not sure that the data I'm reading
+# are in absolute units, so use it for comparing shots."  Consistent but not
+# absolute, which is what a ladder needs; thresholds are not quotable as
+# fields until that normalisation is settled.
+#
+# Log spacing because the usable range is wide: the noise floor sits near
+# 1.8e-07 and the largest excursion seen is 3.0e-05, a factor of 160.
 # ---------------------------------------------------------------------------
-DEFAULT_LADDER = np.arange(2.0, 30.01, 0.25)     # signal-to-floor ratio
+LADDER_MIN = 2.0e-7
+LADDER_MAX = 2.0e-5
+LADDER_NUM = 61
+DEFAULT_LADDER = np.logspace(np.log10(LADDER_MIN), np.log10(LADDER_MAX), LADDER_NUM)
 
 
 def schmitt_first_crossing(time, signal, level, debounce=0.008):
@@ -85,7 +106,8 @@ def schmitt_first_crossing(time, signal, level, debounce=0.008):
 
 
 def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
-                    ft_cfg=None, coherence_min=0.0, want_profiles=False):
+                    ft_cfg=None, coherence_min=0.0, want_profiles=False,
+                    normalize_floor=False):
     """Fetch everything one shot contributes, on that shot's flat-top window.
 
     Returns a dict; `ok` False means the shot is to be dropped, with `reason`
@@ -157,11 +179,11 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
             floor = noise_floor(t, amp, t_pre=min(0.020, max(t_a * 0.5, 1e-3)))
         if not np.isfinite(floor) or floor <= 0:
             continue
-        sig = amp / floor
+        sig = amp / floor if normalize_floor else amp
         if coherence_min > 0:
             sig = np.where(np.isfinite(coh) & (coh >= coherence_min), sig, np.nan)
         win = (t >= t_a) & (t <= t_b)
-        traces[int(n)] = {"time": t[win], "snr": sig[win], "coherence": coh[win],
+        traces[int(n)] = {"time": t[win], "amp": sig[win], "coherence": coh[win],
                           "floor": floor}
     if not traces:
         out["reason"] = "no usable OMAHA trace"
@@ -210,13 +232,13 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008):
         raise ValueError(
             f"no trace for n={n_detect} on shot {sig.get('shot')}; "
             f"available: {sorted(sig['traces'])}")
-    return {f"rm{lv:.4f}": schmitt_first_crossing(tr["time"], tr["snr"], lv, debounce)
+    return {f"rm{lv:.4e}": schmitt_first_crossing(tr["time"], tr["amp"], lv, debounce)
             for lv in ladder}
 
 
 def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       t_start=0.2, n_detect=1, debounce=0.008,
-                      coherence_min=0.0, ft_cfg=None):
+                      coherence_min=0.0, ft_cfg=None, normalize_floor=False):
     """Run the detector over `shots` and return the ladder table."""
     ladder = DEFAULT_LADDER if ladder is None else np.asarray(ladder)
 
@@ -235,7 +257,8 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
 
     for shot in shots:
         sig = collect_signals(shot, client, t_start=t_start, ntor_list=ntor_list,
-                              NFFT=NFFT, ft_cfg=ft_cfg, coherence_min=coherence_min)
+                              NFFT=NFFT, ft_cfg=ft_cfg, coherence_min=coherence_min,
+                              normalize_floor=normalize_floor)
         if not sig["ok"]:
             dropped[shot] = sig["reason"]
             print(f"{shot}: dropped -- {sig['reason']}")
@@ -256,7 +279,8 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
 
 def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                NFFT=512, t_start=0.2, out_csv=None, coherence_min=0.0,
-               debounce=0.008, n_detect=1):
+               debounce=0.008, n_detect=1, normalize_floor=False,
+               ladder_spec=None):
     client = pyuda.Client()
     outputs = {}
 
@@ -264,10 +288,14 @@ def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
         ladder = None
         if thresholds and "ladder" in thresholds:
             ladder = np.asarray(thresholds["ladder"], float)
+        elif ladder_spec is not None:
+            lo, hi, num = ladder_spec
+            ladder = np.logspace(np.log10(lo), np.log10(hi), num)
         det = build_rm_detector(shots=shots, client=client, ladder=ladder,
                                 ntor_list=ntor_list, NFFT=NFFT, t_start=t_start,
                                 n_detect=n_detect, debounce=debounce,
-                                coherence_min=coherence_min)
+                                coherence_min=coherence_min,
+                                normalize_floor=normalize_floor)
         outputs["detector"] = det
         if out_csv:
             det["table"].to_csv(out_csv, index=False)
@@ -294,6 +322,13 @@ def main():
     parser.add_argument("--coherence-min", type=float, default=0.0,
                         help="reject samples whose toroidal fit coherence is below this")
     parser.add_argument("--out-csv", type=str, default=None)
+    parser.add_argument("--normalize-floor", action="store_true",
+                        help="divide the amplitude by each shot's pre-plasma "
+                             "floor and use a signal-to-floor ladder; off by "
+                             "default, see the note on DEFAULT_LADDER")
+    parser.add_argument("--ladder-min", type=float, default=LADDER_MIN)
+    parser.add_argument("--ladder-max", type=float, default=LADDER_MAX)
+    parser.add_argument("--ladder-num", type=int, default=LADDER_NUM)
 
     parser.add_argument("--thresholds", type=str)
     parser.add_argument("--thresholds-file", type=str)
@@ -318,6 +353,8 @@ def main():
         coherence_min=args.coherence_min,
         debounce=args.debounce,
         n_detect=args.n_detect,
+        normalize_floor=args.normalize_floor,
+        ladder_spec=(args.ladder_min, args.ladder_max, args.ladder_num),
     )
 
 

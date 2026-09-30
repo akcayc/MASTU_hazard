@@ -45,21 +45,21 @@ def main():
             if t:
                 print(f"  {t} shots truncated by the record, "
                       f"{df['lost_exposure'].sum():.2f} s exposure lost")
-        print(f"\n  {'level':>8} {'events':>7} {'frac':>7} {'hazard 1/s':>11}   knee")
+        print(f"\n  {'level':>12} {'events':>7} {'frac':>7} {'hazard 1/s':>11}   knee")
         prev = None
         for lvl, n, frac, haz in rows:
             drop = "" if prev is None or prev == 0 else \
                 ("  <<<" if (prev - n) / prev > 0.30 else "")
-            print(f"  {lvl:8.4f} {n:7d} {frac:7.3f} {haz:11.4f}{drop}")
+            print(f"  {lvl:12.4e} {n:7d} {frac:7.3f} {haz:11.4f}{drop}")
             prev = n
         print("\n  <<< marks a >30% fall from the previous level.")
 
     if len(a.csv) == 2:
         (r0, _), (r1, _) = curve(pd.read_csv(a.csv[0])), curve(pd.read_csv(a.csv[1]))
         print(f"\n=== {labels[0]} -> {labels[1]} ===")
-        print(f"  {'level':>8} {'before':>7} {'after':>7} {'removed':>8}")
+        print(f"  {'level':>12} {'before':>7} {'after':>7} {'removed':>8}")
         for (lvl, n0, _, _), (_, n1, _, _) in zip(r0, r1):
-            print(f"  {lvl:8.4f} {n0:7d} {n1:7d} {n0-n1:8d}")
+            print(f"  {lvl:12.4e} {n0:7d} {n1:7d} {n0-n1:8d}")
         print("\n  A gate should only ever REMOVE crossings.  Negative means a bug.")
 
 
