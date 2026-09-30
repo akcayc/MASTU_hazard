@@ -83,7 +83,7 @@ from saddle_analysis import (
 COHERENCE_GATE_SUGGESTED = 0.6
 
 
-def amplitude_with_coherence(rm, sel: AmplitudeSelector):
+def amplitude_with_coherence(rm, sel: AmplitudeSelector, coh_min=0.0):
     """RecognizedModes.amplitude() plus the power-weighted coherence.
 
     Mirrors the upstream method exactly for amplitude and frequency, then
@@ -114,7 +114,22 @@ def amplitude_with_coherence(rm, sel: AmplitudeSelector):
     power_spectrum = zeros_spectrum(sel.time, sel.f_min, sel.f_max,
                                     tsel, Fsel, power_spectrum)
 
+    # per-bin coherence for this n, over the same selection
+    match = np.flatnonzero(np.asarray(rm.n_tor_searched) == sel.ntor)
+    coh = (rm.coherence[int(match[0])].T[:, idf][idt, :] if match.size
+           else np.full(power_spectrum.shape, np.nan))
+
+    # The gate belongs INSIDE the frequency sum, as in DIII-D's get_amplitude:
+    # a bin that fails coherence must contribute zero to the amplitude, not
+    # merely disqualify the time slice after the fact.  Gating slices instead
+    # leaves the noise bins in the sum, so the amplitude carries an
+    # irreducible floor (~1.8 mG on the OMAHA subset) that no gate setting can
+    # lower -- which is what made a 0.2 gate fire on every low rung and a 0.8
+    # gate fire on nothing.
     id_mask = Ntor != sel.ntor
+    if coh_min > 0:
+        id_mask = id_mask | ~(np.isfinite(coh) & (coh >= coh_min))
+
     power_masked = np.ma.array(power_spectrum, mask=id_mask)
     power_sum = power_masked.sum(axis=1)
 
@@ -123,14 +138,10 @@ def amplitude_with_coherence(rm, sel: AmplitudeSelector):
     Fa[Bp < sel.v_min] = np.nan
     Ba = Bp / Fa / 2 / np.pi
 
-    # coherence for this n, same selection, power-weighted across frequency
-    match = np.flatnonzero(np.asarray(rm.n_tor_searched) == sel.ntor)
-    if match.size == 0:
-        coh_w = np.full(tsel.shape, np.nan)
-    else:
-        coh = rm.coherence[int(match[0])].T[:, idf][idt, :]
-        coh_masked = np.ma.array(coh, mask=id_mask)
-        coh_w = ((coh_masked * power_masked).sum(axis=1) / power_sum).filled(np.nan)
+    # slice-level coherence, power-weighted over the surviving bins -- reported
+    # for diagnostics, no longer the thing the gate acts on
+    coh_masked = np.ma.array(coh, mask=id_mask)
+    coh_w = ((coh_masked * power_masked).sum(axis=1) / power_sum).filled(np.nan)
 
     return tsel, Fa, Bp, Ba, coh_w
 
@@ -152,7 +163,7 @@ def noise_floor(time, values, t_pre=0.020):
 
 def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
                  freq_min=None, freq_max=None, v_min=VMIN_DEFAULT,
-                 t_pre=0.020, out=None):
+                 t_pre=0.020, out=None, coh_min=0.0):
     """Per-shot analysis with coherence and noise floor.
 
     Returns (per_n, meta):
@@ -195,7 +206,7 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
     for n in ntor:
         n = int(n)
         sel = AmplitudeSelector(n, time_interval, freq_min, freq_max, v_min)
-        t, freq, Bp, Ba, coh = amplitude_with_coherence(rm, sel)
+        t, freq, Bp, Ba, coh = amplitude_with_coherence(rm, sel, coh_min)
         per_n[n] = {
             "amp": Ba,
             "damp_dt": Bp,
@@ -215,5 +226,6 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
         "fs_hz": float(1.0 / np.mean(np.diff(sd.time))) if sd.time.size > 1 else np.nan,
         "freq_band": (float(freq_min.min()), float(freq_max.max())),
         "v_min": v_min,
+        "coh_min": coh_min,
     }
     return per_n, meta

@@ -150,7 +150,8 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     # list sees one rotation direction only.  n=0 is axisymmetric, so excluded.
     ntor = np.array([n for n in (ntor_list or NTOR_DEFAULT) if n != 0])
     try:
-        modes, meta = analyze_shot(shot, NFFT=NFFT, ntor=ntor)
+        modes, meta = analyze_shot(shot, NFFT=NFFT, ntor=ntor,
+                                   coh_min=coherence_min)
     except Exception as e:
         out["reason"] = f"OMAHA: {e}"
         return out
@@ -192,9 +193,10 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
             continue
         amp = amp * GAUSS_PER_TESLA          # -> gauss
         floor = floor * GAUSS_PER_TESLA
+        # No slice-level filter here: coherence_min was applied per frequency
+        # bin inside the amplitude sum (saddle_extras.amplitude_with_coherence),
+        # which is where it belongs.  Gating slices as well would double-count.
         sig = amp / floor if normalize_floor else amp
-        if coherence_min > 0:
-            sig = np.where(np.isfinite(coh) & (coh >= coherence_min), sig, np.nan)
         win = (t >= t_a) & (t <= t_b)
         traces[int(n)] = {"time": t[win], "amp": sig[win], "coherence": coh[win],
                           "floor": floor}
@@ -333,7 +335,8 @@ def main():
     parser.add_argument("--debounce", type=float, default=0.008,
                         help="trigger confirmation time [s]")
     parser.add_argument("--coherence-min", type=float, default=0.0,
-                        help="reject samples whose toroidal fit coherence is below this")
+                        help="zero frequency bins whose toroidal-fit coherence is "
+                             "below this, before the amplitude sum")
     parser.add_argument("--out-csv", type=str, default=None)
     parser.add_argument("--normalize-floor", action="store_true",
                         help="divide the amplitude by each shot's pre-plasma "

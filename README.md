@@ -157,6 +157,39 @@ carries both signs, matching Giovannozzi's instruction that `n_detection` takes
 *"a list of toroidal mode number (positive and negative)"*. Which half carries
 the coherence tells you the sense of rotation. See `docs/` §9.6.
 
+## The coherence gate goes inside the frequency sum
+
+`amplitude_with_coherence(rm, sel, coh_min)` zeroes each (frequency, time) bin
+whose toroidal-fit coherence is below `coh_min` **before** the amplitude sum,
+matching DIII-D's `get_amplitude`, which builds a per-bin weight `W`, sets
+`W[SC12 < coh_min] = 0`, and only then sums over frequency.
+
+This matters more than it sounds. An earlier version gated whole *time slices*
+after the sum, which left every noise bin inside it. The band is 100 Hz–50 kHz
+at 391 Hz resolution, ~127 bins, and with 8 candidate n the argmax hands each
+one roughly 16 bins whether or not a mode is present — so the amplitude carried
+an irreducible ~1.8 mG floor that no gate setting could lower. Symptoms: a 0.2
+gate fires on every low rung of the ladder, a 0.8 gate NaNs every slice and
+fires on nothing. Both were observed over 100 shots.
+
+With the gate in the right place, on synthetic data through Giovannozzi's real
+classes:
+
+| `coh_min` | noise floor | weak mode | SNR |
+|---|---|---|---|
+| 0.0 | 0.176 | 0.641 | 3.6 |
+| 0.4 | 0.130 | 0.629 | 4.8 |
+| 0.8 | 0.055 | 0.613 | 11.2 |
+
+The floor falls 3.2x while the signal moves 0.4%. `coh_min = 0` remains
+bit-identical to `RecognizedModes.amplitude()`, which `check_equivalence.py`
+asserts.
+
+If every bin in a slice is gated out the amplitude is NaN, not zero — no bin
+survived, so there is no coherent power to report. `schmitt_first_crossing`
+treats NaN as not-above-threshold, so a gated-out stretch cannot trigger and
+resets the debounce, which is the intended behaviour.
+
 ## Not yet written
 
 Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectral

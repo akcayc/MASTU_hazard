@@ -18,17 +18,19 @@ from saddle_extras import amplitude_with_coherence
 NC, FS, T = 8, 200_000.0, 0.30
 F_MODE, N_MODE, T_ON = 10_000.0, 2, 0.15
 NTOR = np.array([1, 2, 3, 4])
+#: a full evenly-spaced torus -- a clean testbed, NOT the OMAHA geometry
+PHI = np.linspace(0, 360, NC, endpoint=False)
 
 
-def build(sign, seed=0):
+def build(sign, seed=0, mode_amp=20.0):
     """Synthetic array data: white noise, plus an n=2 mode after T_ON."""
     rng = np.random.default_rng(seed)
-    phi = np.linspace(0, 360, NC, endpoint=False)
+    phi = PHI
     t = np.arange(0, T, 1 / FS)
     data = rng.normal(0, 1.0, (NC, t.size))
     on = t > T_ON
     for c in range(NC):
-        data[c, on] += 20.0 * np.sin(
+        data[c, on] += mode_amp * np.sin(
             2 * np.pi * F_MODE * t[on] + sign * np.radians(phi[c]) * N_MODE)
     sd = SaddleFull(1, np.array([f"c{i}" for i in range(NC)]), t, data, phi,
                     np.full(NC, "OMAHA"))
@@ -87,6 +89,32 @@ def main():
                 ok &= good
                 print(f"    {'PASS' if good else 'FAIL'}  injected n detected"
                       f" = {expect_detect}")
+
+    # --- 4. the gate belongs inside the frequency sum ------------------------
+    # A bin failing coherence must contribute zero to the amplitude.  Gating
+    # whole time slices instead leaves the noise bins in the sum, so the
+    # amplitude keeps an irreducible floor no gate setting can lower.
+    print("\n  gate inside the sum: floor must fall faster than the signal")
+    rm_n = build(sign=-1, mode_amp=0.0).spectrum(512).n_detection(NTOR)   # no mode
+    rm_m = build(sign=-1).spectrum(512).n_detection(NTOR)              # mode
+    sel = AmplitudeSelector(ntor=N_MODE, **sel_kw)
+    prev = None
+    for g in (0.0, 0.4, 0.8):
+        _, _, Bp_n, _, _ = amplitude_with_coherence(rm_n, sel, g)
+        _, _, Bp_m, _, _ = amplitude_with_coherence(rm_m, sel, g)
+        fn = np.nanmedian(Bp_n[np.isfinite(Bp_n)])
+        fm = np.nanmedian(Bp_m[np.isfinite(Bp_m)])
+        print(f"    coh_min={g:.1f}  floor={fn:8.4f}  signal={fm:9.4f}  SNR={fm/fn:7.1f}")
+        if prev is not None:
+            # NaN floor = every bin gated out, i.e. no coherent power at all.
+            # That is the floor collapsing completely, not a failure.
+            fell = (not np.isfinite(fn)) or fn < prev[0]
+            held = fm > 0.95 * prev[1]
+            ok &= (fell and held)
+            note = " (floor fully suppressed)" if not np.isfinite(fn) else ""
+            print(f"    {'PASS' if fell and held else 'FAIL'}  floor fell, "
+                  f"signal held{note}")
+        prev = (fn if np.isfinite(fn) else 0.0, fm)
 
     print("\n  NOTE  the opposite-handedness block is the important one: the")
     print("        coherence correctly collapses, yet the UNGATED amplitude")
