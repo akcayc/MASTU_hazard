@@ -123,7 +123,8 @@ a threshold cannot be quoted as a field or compared against DIII-D. `specgram`
 also applies no window-power or sample-rate normalisation, so an O(1) factor is
 unaccounted for on top.
 
-The ladder is therefore **absolute**, in the amplitude's own units. An earlier
+The ladder is therefore **absolute, in gauss** (`GAUSS_PER_TESLA = 1.0e4`,
+the same convention as the DIII-D detector). An earlier
 version divided by each shot's pre-plasma floor, justified by a ~10x spread in
 per-shot median amplitude — but that was measured over the whole record, plasma
 included. Measured where there is no plasma (t < 20 ms, instrumental by
@@ -136,6 +137,17 @@ A fixed absolute level is a consistent criterion to ~12%; a fixed
 signal-to-floor level would vary by 1.88x in absolute terms. `--normalize-floor`
 restores the old behaviour for comparison, and the `floor` column is written
 either way.
+
+The tesla reading is settled by plausibility: as stored, the noise floor is
+1.8e-07 and the largest excursion 3.0e-05. Taken as gauss, that floor would be
+0.018 nT — far below any real magnetic noise. Taken as tesla it is 1.8 mG with
+a 0.30 G peak, which is what saddle coils should see. The default ladder spans
+2 mG to 0.3 G in 61 log-spaced steps.
+
+These gauss still carry the unverified O(1) factor from the missing `specgram`
+window-power normalisation, so they are comparable between your shots but not
+yet against DIII-D's 1–30 G. Settling that factor relabels every column by one
+constant, with no re-detection.
 
 **Toroidal handedness.** `Spectra.n_detection` projects onto `exp(+i n phi)`,
 so it detects modes whose spectral phase runs as `exp(-i n phi)`. A mode of the

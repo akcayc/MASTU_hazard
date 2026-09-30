@@ -61,17 +61,28 @@ except ImportError:
 # 1.88x in absolute terms -- inconsistent in the direction that matters, and
 # it would divide out the cross-shot variation the hazard model learns from.
 #
-# Units are those of ModeAmplitude.amplitude, nominally tesla.  Giovannozzi:
-# "I'm saying T and T/s but, really, I'm not sure that the data I'm reading
-# are in absolute units, so use it for comparing shots."  Consistent but not
-# absolute, which is what a ladder needs; thresholds are not quotable as
-# fields until that normalisation is settled.
+# Units: GAUSS.  ModeAmplitude.amplitude is nominally tesla, so it is scaled
+# by GAUSS_PER_TESLA here -- the same convention as the DIII-D detector, which
+# applies its own 1.0e4 for exactly this reason.  The reading is settled by
+# plausibility: as stored, the noise floor is 1.8e-07 and the largest
+# excursion 3.0e-05.  Taken as gauss that floor would be 0.018 nT, far below
+# any real magnetic noise.  Taken as tesla it is 1.8 mG with a 0.30 G peak,
+# which is what saddle coils should see.
 #
-# Log spacing because the usable range is wide: the noise floor sits near
-# 1.8e-07 and the largest excursion seen is 3.0e-05, a factor of 160.
+# Still not an absolute calibration.  Giovannozzi: "I'm saying T and T/s but,
+# really, I'm not sure that the data I'm reading are in absolute units, so use
+# it for comparing shots."  So these gauss are consistent between shots --
+# which is all a ladder needs -- but carry an unverified O(1) factor from the
+# missing specgram window-power normalisation, and should not yet be compared
+# against published DIII-D numbers.  Settling that factor relabels every
+# column by one constant; no re-detection.
+#
+# Log spacing because the usable range is wide: 1.8 mG to 0.30 G is 160x.
 # ---------------------------------------------------------------------------
-LADDER_MIN = 2.0e-7
-LADDER_MAX = 2.0e-5
+GAUSS_PER_TESLA = 1.0e4
+
+LADDER_MIN = 2.0e-3      # gauss
+LADDER_MAX = 3.0e-1      # gauss
 LADDER_NUM = 61
 DEFAULT_LADDER = np.logspace(np.log10(LADDER_MIN), np.log10(LADDER_MAX), LADDER_NUM)
 
@@ -179,6 +190,8 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
             floor = noise_floor(t, amp, t_pre=min(0.020, max(t_a * 0.5, 1e-3)))
         if not np.isfinite(floor) or floor <= 0:
             continue
+        amp = amp * GAUSS_PER_TESLA          # -> gauss
+        floor = floor * GAUSS_PER_TESLA
         sig = amp / floor if normalize_floor else amp
         if coherence_min > 0:
             sig = np.where(np.isfinite(coh) & (coh >= coherence_min), sig, np.nan)
@@ -232,7 +245,7 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008):
         raise ValueError(
             f"no trace for n={n_detect} on shot {sig.get('shot')}; "
             f"available: {sorted(sig['traces'])}")
-    return {f"rm{lv:.4e}": schmitt_first_crossing(tr["time"], tr["amp"], lv, debounce)
+    return {f"rm{lv:.5f}": schmitt_first_crossing(tr["time"], tr["amp"], lv, debounce)
             for lv in ladder}
 
 
