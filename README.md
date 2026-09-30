@@ -190,6 +190,35 @@ survived, so there is no coherent power to report. `schmitt_first_crossing`
 treats NaN as not-above-threshold, so a gated-out stretch cannot trigger and
 resets the debounce, which is the intended behaviour.
 
+## Where the gate goes: 0.60
+
+Measured on 93 shots of 47000-47099 with `coherence_survey.py` — 10.1M in-band
+bins, 5 OMAHA coils at phi = [36.8, 26.5, 4.0, -5.0, -23.0]:
+
+| gate | bins kept | power kept | noise through |
+|---|---|---|---|
+| 0.20 | 80.5% | 92.4% | 100% |
+| 0.30 | 42.7% | 64.5% | 99.9% |
+| 0.40 | 15.9% | 53.5% | 52.0% |
+| 0.50 | 4.9% | 50.4% | 2.1% |
+| **0.60** | **2.8%** | **48.8%** | **0.005%** |
+| 0.70 | 1.7% | 45.3% | 0% |
+| 0.80 | 0.76% | 19.3% | 0% |
+
+Power kept is flat across 0.40–0.70 while bins kept falls ninefold and noise
+leakage collapses to zero. That shelf is the detection: about half the in-band
+power sits in a small, highly coherent population and the rest is noise spread
+over millions of bins. At 0.80 power kept falls to 19.3% — the gate has started
+cutting real signal — so the shelf ends near 0.70.
+
+**0.60** leaks roughly 500 noise bins in 10 million while keeping 48.8% of the
+power. Run 0.55 and 0.70 as the sensitivity pair, the way DIII-D repeats its
+whole study over `POINT-A` … `POINT-F`.
+
+The simulated noise floor (median 0.402 on this geometry) sits *above* the
+observed median of 0.279, so the simulation is a conservative white-noise
+idealisation — real leakage is lower than the table says, not higher.
+
 ## Not yet written
 
 Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectral

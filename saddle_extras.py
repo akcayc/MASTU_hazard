@@ -76,10 +76,20 @@ from saddle_analysis import (
 )
 
 
-# Coherence gate.  The theoretical pure-noise floor is 1/N_c, but the measured
-# floor in the offline test sat near 2/N_c, so set the gate from the measured
-# distribution rather than from theory.  With a floor of ~0.25 and a genuine
-# mode at ~1.0, anything in 0.5-0.7 separates cleanly.
+# Coherence gate, measured on 93 shots of 47000-47099 (10.1M in-band bins,
+# 5 OMAHA coils).  coherence_survey.py gave:
+#
+#     gate   bins kept   power kept   noise through
+#     0.20     80.5%        92.4%        100%
+#     0.40     15.9%        53.5%         52%
+#     0.60      2.8%        48.8%          0.005%
+#     0.80      0.76%       19.3%          0%
+#
+# Power kept is flat across 0.40-0.70 (53.5 -> 45.3%) while bins kept falls
+# ninefold and noise leakage collapses: half the in-band power sits in a small
+# highly-coherent population, the rest is noise across millions of bins.  At
+# 0.80 power kept drops to 19.3%, which is the gate cutting real signal, so the
+# shelf ends near 0.70.  0.60 leaks ~500 noise bins in 10M and keeps 48.8%.
 COHERENCE_GATE_SUGGESTED = 0.6
 
 
