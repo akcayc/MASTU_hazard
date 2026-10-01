@@ -38,6 +38,10 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
 
 #: direct labels stay legible up to four curves; past that the legend carries it
 MAX_DIRECT_LABELS = 4
+
+#: type sizes in points; --font-scale multiplies all of them together
+FS = dict(title=17.0, subtitle=12.0, axis=13.0, tick=11.5, minor=10.0,
+          legend=12.5, direct=12.5, note=11.5)
 INK, INK2, INK3 = "#0b0b0b", "#52514e", "#8a8984"
 SURFACE, GRID = "#fcfcfb", "#e4e3de"
 
@@ -98,11 +102,14 @@ def main():
     p.add_argument("--labels", nargs="+")
     p.add_argument("--out", default="ladder")
     p.add_argument("--smooth", type=int, default=5)
+    p.add_argument("--font-scale", type=float, default=1.0,
+                   help="multiply every type size (default 1.0)")
     p.add_argument("--excess", type=float, default=1.0,
                    help="how much steeper than the plateau counts "
                         "as the knee, in log-log slope units")
     a = p.parse_args()
     labels = a.labels or [f.rsplit("/", 1)[-1].replace(".csv", "") for f in a.csv]
+    fs = {k: v * a.font_scale for k, v in FS.items()}
     if len(a.csv) > len(SERIES):
         raise SystemExit(
             f"{len(a.csv)} curves requested but the categorical order has "
@@ -112,10 +119,11 @@ def main():
     direct = len(a.csv) <= MAX_DIRECT_LABELS
 
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(8.6, 8.2), sharex=True,
-        gridspec_kw=dict(height_ratios=[2.1, 1.0], hspace=0.12))
+        2, 1, figsize=(10.0, 9.4), sharex=True,
+        gridspec_kw=dict(height_ratios=[2.1, 1.0], hspace=0.14))
     fig.patch.set_facecolor(SURFACE)
-    fig.subplots_adjust(left=0.115, right=0.80, top=0.885, bottom=0.085)
+    # right margin leaves room for the direct labels at the larger type size
+    fig.subplots_adjust(left=0.125, right=0.760, top=0.878, bottom=0.088)
 
     rows, nshots, knees, ends = [], None, {}, []
     for i, (path, lab) in enumerate(zip(a.csv, labels)):
@@ -128,11 +136,11 @@ def main():
         c = SERIES[i]
 
         m = ev > 0
-        ax1.plot(lv[m], ev[m], color=c, lw=2.0, solid_capstyle="round", zorder=3)
+        ax1.plot(lv[m], ev[m], color=c, lw=2.4, solid_capstyle="round", zorder=3)
         off = (i * 2) % 6
-        ax1.plot(lv[m][off::6], ev[m][off::6], "o", color=c, ms=4.5, mec=SURFACE,
-                 mew=1.2, zorder=4, label=lab)
-        ax2.plot(lv, sl, color=c, lw=2.0, solid_capstyle="round", zorder=3)
+        ax1.plot(lv[m][off::6], ev[m][off::6], "o", color=c, ms=5.5, mec=SURFACE,
+                 mew=1.3, zorder=4, label=lab)
+        ax2.plot(lv, sl, color=c, lw=2.4, solid_capstyle="round", zorder=3)
 
         if m.any() and direct:            # deferred: placed after, destaggered
             ends.append([lv[m][-1], ev[m][-1], lab, c])
@@ -160,36 +168,40 @@ def main():
         ends.sort(key=lambda e: e[1])
         inv, fwd = ax1.transData.inverted(), ax1.transData
         ypix = [fwd.transform((x, y))[1] for x, y, _, _ in ends]
-        for i in range(1, len(ypix)):          # 13 px minimum separation
-            if ypix[i] - ypix[i - 1] < 13.0:
-                ypix[i] = ypix[i - 1] + 13.0
+        gap = fs["direct"] * 1.55              # separation scales with the type
+        for i in range(1, len(ypix)):
+            if ypix[i] - ypix[i - 1] < gap:
+                ypix[i] = ypix[i - 1] + gap
         for (x, y, lab, c), yp in zip(ends, ypix):
             yd = inv.transform((0, yp))[1]
             # colored mark carries identity; the text stays in ink
-            ax1.plot([x], [yd], "o", color=c, ms=5.5, mec=SURFACE, mew=1.2,
+            ax1.plot([x], [yd], "o", color=c, ms=6.5, mec=SURFACE, mew=1.3,
                      clip_on=False, zorder=5)
             ax1.annotate(lab, (x, yd), xytext=(11, 0), textcoords="offset points",
-                         color=INK2, fontsize=9.5, va="center",
+                         color=INK2, fontsize=fs["direct"], va="center",
                          annotation_clip=False)
-    ax1.set_ylabel("events  (shots with a crossing)", color=INK2, fontsize=10)
-    fig.text(0.115, 0.955, "Tearing-mode events vs threshold amplitude",
-             color=INK, fontsize=13.5, fontweight="semibold", ha="left")
-    fig.text(0.115, 0.925, f"n=1 OMAHA ladder, {nshots} MAST-U shots - "
-             f"dashed lines mark where each curve leaves its plateau",
-             color=INK3, fontsize=9.5, ha="left")
-    leg = ax1.legend(frameon=False, loc="lower left", fontsize=9.5,
-                     labelcolor=INK2, handletextpad=0.6,
-                     bbox_to_anchor=(0.015, 0.045),
+    ax1.set_ylabel("events  (shots with a crossing)", color=INK2,
+                   fontsize=fs["axis"])
+    fig.text(0.125, 0.958, "Tearing-mode events vs threshold amplitude",
+             color=INK, fontsize=fs["title"], fontweight="semibold", ha="left")
+    fig.text(0.125, 0.922, f"n=1 OMAHA ladder, {nshots} MAST-U shots - "
+             f"dashed lines mark the plateau departure",
+             color=INK3, fontsize=fs["subtitle"], ha="left")
+    leg = ax1.legend(frameon=False, loc="lower left", fontsize=fs["legend"],
+                     labelcolor=INK2, handletextpad=0.7,
+                     bbox_to_anchor=(0.015, 0.04),
                      ncol=1 if len(a.csv) <= 4 else 2,
                      columnspacing=1.6)
     leg.set_zorder(5)
 
     ax2.axhline(0, color=GRID, lw=1.0, zorder=1)
-    ax2.set_ylabel("local slope\nd log N / d log A", color=INK2, fontsize=10)
-    ax2.set_xlabel("threshold amplitude  [gauss]", color=INK2, fontsize=10)
-    ax2.text(0.0, 1.04, "flat = saturated, nearly every shot crosses;  "
-             "the break is where the threshold starts to discriminate",
-             transform=ax2.transAxes, color=INK3, fontsize=9)
+    ax2.set_ylabel("local slope\nd log N / d log A", color=INK2,
+                   fontsize=fs["axis"])
+    ax2.set_xlabel("threshold amplitude  [gauss]", color=INK2,
+                   fontsize=fs["axis"], labelpad=8)
+    ax2.text(0.0, 1.05, "flat = saturated; the break is where the threshold "
+             "starts to discriminate",
+             transform=ax2.transAxes, color=INK3, fontsize=fs["note"])
 
     for ax in (ax1, ax2):
         ax.set_facecolor(SURFACE)
@@ -199,12 +211,12 @@ def main():
             ax.spines[sp].set_visible(False)
         for sp in ("left", "bottom"):
             ax.spines[sp].set_color(GRID)
-        ax.tick_params(colors=INK2, labelsize=9, which="both")
+        ax.tick_params(colors=INK2, labelsize=fs["tick"], which="both")
     ax2.xaxis.set_major_formatter(matplotlib.ticker.LogFormatterSciNotation())
     ax2.xaxis.set_minor_formatter(
         matplotlib.ticker.FuncFormatter(
             lambda v, _: f"{v:g}" if v in (0.002, 0.005, 0.02, 0.05, 0.2) else ""))
-    ax2.tick_params(axis="x", which="minor", labelsize=8, colors=INK3)
+    ax2.tick_params(axis="x", which="minor", labelsize=fs["minor"], colors=INK3)
 
     for ext in ("png", "pdf"):
         fig.savefig(f"{a.out}.{ext}", dpi=170, facecolor=SURFACE,
