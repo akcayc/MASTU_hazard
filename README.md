@@ -26,6 +26,7 @@ recomputation over the database.
 | `saddle_extras.py` | Additions. `amplitude_with_coherence`, `noise_floor`, `analyze_shot`, `NTOR_BOTH_SIGNS` |
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
+| `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
 | `tests/` | Offline test suite; runs without Freya |
