@@ -47,6 +47,25 @@ except ImportError:
 
 MU0 = 4.0e-7 * np.pi
 
+#: EPM on MAST-U writes a fixed-length record: 197 slices over [0.025, 1.020] s,
+#: so dt = 5.08 ms -- four times finer than the DIII-D EFIT grid the tolerances
+#: below were tuned on.  They are derived from the measured cadence instead of
+#: inherited, because all three scale with it.
+EPM_NOMINAL_DT = 5.077e-3
+
+
+def derived_tolerances(dt):
+    """Tolerances that must track the equilibrium cadence, not be hard-coded.
+
+    event_delta  2 slices.  How far the last surviving equilibrium may sit
+                 before the event time before the label is untrustworthy and
+                 the event is dropped.  DIII-D: 40 ms on a 20 ms grid.
+    merge_delta  dt/4.  The EPM<->EPQ pairing window: narrow enough that only
+                 genuinely co-timed slices pair, never neighbours.
+                 DIII-D: 5 ms on a 20 ms grid.
+    """
+    return {"event_delta": 2.0 * dt, "merge_delta": 0.25 * dt}
+
 
 # ---------------------------------------------------------------------------
 # fetching
@@ -94,10 +113,67 @@ def probe(shot, tag, client):
         except Exception as e:
             print(f"  [external] {name:9s} MISSING  {path}  ({type(e).__name__})")
             missing.append(f"external.{name}")
-    for path in NODES.R0_CANDIDATES:
+    # --- R0 ---------------------------------------------------------------
+    # Every length feature divides by R0, so a wrong value rescales the whole
+    # geometric half of the set.  RT and RMIDPLANEOUT resolve but read NaN on
+    # 47002, so try the B*R route: BVACRADIUSPRODUCT is the product at the
+    # reference radius (DIII-D's BCENTR-at-RZERO convention), and dividing it
+    # by the vacuum field quoted at a named radius recovers that radius.
+    print("\n  [R0]")
+
+    def _val(path):
         r = _get(client, tag, path, shot)
-        print(f"  [R0 cand ] {path:46s} {'ok' if r else 'missing'}"
-              + (f"  value {np.atleast_1d(r[0])[0]:.4f}" if r else ""))
+        if r is None:
+            return None, "missing"
+        d = np.atleast_1d(np.asarray(r[0], float))
+        fin = d[np.isfinite(d)]
+        if fin.size == 0:
+            return None, "all NaN"
+        const = np.ptp(fin) / max(abs(np.mean(fin)), 1e-12) < 1e-6
+        return fin, ("constant" if const else f"varies {fin.min():.4f}..{fin.max():.4f}")
+
+    probes = {
+        "BVACRADIUSPRODUCT": "INPUT/BVACRADIUSPRODUCT",
+        "BVACRGEOM":         "OUTPUT/GLOBALPARAMETERS/BVACRGEOM",
+        "BVACRMAG":          "OUTPUT/GLOBALPARAMETERS/BVACRMAG",
+        "RT":                "OUTPUT/GLOBALPARAMETERS/RT",
+        "MAGNETICAXIS":      "OUTPUT/GLOBALPARAMETERS/MAGNETICAXIS",
+        "ZGEOM":             "OUTPUT/SEPARATRIXGEOMETRY/ZGEOM",
+    }
+    vals = {}
+    for nm, path in probes.items():
+        v, note = _val(path)
+        vals[nm] = v
+        shown = f"{np.median(v):.5f}" if v is not None else "--"
+        print(f"    {nm:18s} {shown:>10s}   {note}")
+
+    br = vals.get("BVACRADIUSPRODUCT")
+    for nm in ("BVACRGEOM", "BVACRMAG"):
+        b = vals.get(nm)
+        if br is not None and b is not None:
+            n = min(br.size, b.size)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                R = np.asarray(br[-n:], float) / np.asarray(b[-n:], float)
+            R = R[np.isfinite(R)]
+            if R.size:
+                print(f"    BVACRADIUSPRODUCT / {nm:11s} -> R = {np.median(R):.5f} m"
+                      f"  (spread {R.min():.5f}..{R.max():.5f})")
+
+    # independent cross-check from the boundary itself
+    rb = _get(client, tag, NODES.SOURCES["rbdry"], shot)
+    if rb is not None:
+        R = np.atleast_2d(np.asarray(rb[0], float))
+        R = np.where(R > 0, R, np.nan)
+        with np.errstate(invalid="ignore"):
+            rgeo = (np.nanmin(R, axis=1) + np.nanmax(R, axis=1)) / 2.0
+        rgeo = rgeo[np.isfinite(rgeo)]
+        if rgeo.size:
+            print(f"    geometric centre (rmin+rmax)/2  -> {np.median(rgeo):.5f} m"
+                  f"  (spread {rgeo.min():.5f}..{rgeo.max():.5f})")
+    print(f"    fallback currently in use       -> {NODES.R0_FALLBACK:.5f} m")
+    print("    Pick the candidate that is CONSTANT and physically sensible;"
+          "\n    a time-varying R0 would fold plasma motion into every length.")
+
     print(f"\n  {len(missing)} missing: {missing}" if missing else "\n  all nodes resolved")
     return missing
 
@@ -131,9 +207,26 @@ def fetch_record(shot, tag, client):
         if n != "time":
             rec[n] = need("sources", n, p)
     for n, p in NODES.QUALITY.items():
-        rec[n] = need("quality", n, p)
+        v = need("quality", n, p)
+        if v.ndim == 2:
+            # (time, n_iter): the per-iteration history, not the converged
+            # value.  Take the last finite entry per slice.
+            out = np.full(v.shape[0], np.nan)
+            for k in range(v.shape[0]):
+                fin = np.flatnonzero(np.isfinite(v[k]))
+                if fin.size:
+                    out[k] = v[k, fin[-1]]
+            v = out
+        rec[n] = v
     for n, p in NODES.PROFILES.items():
         rec[n] = need("profiles", n, p)
+
+    for n, p in NODES.SHAPING_SCALAR.items():        # optional, preferred
+        if p is None:
+            continue
+        r = _get(client, tag, p, shot)
+        if r is not None and np.asarray(r[0]).ndim == 1:
+            rec[n + "_scalar"] = np.asarray(r[0], float)
 
     for n, p in NODES.FLAGS.items():                 # optional
         r = _get(client, tag, p, shot)
@@ -207,10 +300,24 @@ def derive(rec):
             ngw = np.abs(rec["ip"] / 1.0e6) / (np.pi * a ** 2)
             rec["nhat"] = n_bar / ngw
 
-    # shaping: profile nodes are (time, psi_n); the boundary is the last column
+    # Shaping.  SEPARATRIXGEOMETRY carries (time,) scalars for the
+    # triangularities and is preferred; there is no scalar ELONGATION, so
+    # kappa comes from the profile's boundary column.
     for nm in ("kappa", "tritop", "tribot"):
-        v = np.asarray(rec[nm], float)
-        rec[nm + "_b"] = v[:, -1] if v.ndim == 2 else v
+        scal = rec.get(nm + "_scalar")
+        if scal is not None and np.asarray(scal).ndim == 1:
+            rec[nm + "_b"] = np.asarray(scal, float)
+            rec[nm + "_b_source"] = "separatrix"
+        else:
+            v = np.asarray(rec[nm], float)
+            rec[nm + "_b"] = v[:, -1] if v.ndim == 2 else v
+            rec[nm + "_b_source"] = "profile[:, -1]"
+
+    # R0 cross-check: the geometric centre should sit near the fixed R0 used
+    # for normalisation.  Reported only -- a time-varying R0 would fold plasma
+    # motion into every length feature.
+    rgeo = (bbox[:, 0] + bbox[:, 1]) / 2.0
+    rec["rgeo_median"] = float(np.nanmedian(rgeo)) if np.isfinite(rgeo).any() else np.nan
     return rec
 
 
@@ -292,7 +399,14 @@ def extract_shot(shot, tag, client, ta=None, tb=None, use_alts=False,
     T, X, names = make_descriptor_table(rec, use_alts, include_glitch)
 
     # (1) chop to [tsof, tevent] -- NOT to end of flat-top
+    clipped_low = False
     if ta is not None and tb is not None:
+        # EPM covers [0.025, 1.020] s while OMAHA covers [0.001, 0.997]; an
+        # event detected before the equilibrium record opens has no features
+        # to attach to, and must be reported rather than silently truncated.
+        if ta < rec["time"][0]:
+            clipped_low = True
+            ta = float(rec["time"][0])
         keep = (T >= ta) & (T <= tb)
         T, X = T[keep], X[keep, :]
     if T.size < min_timestamps:
@@ -301,7 +415,7 @@ def extract_shot(shot, tag, client, ta=None, tb=None, use_alts=False,
     return {"shot": int(shot), "tag": tag, "time": T, "features": X,
             "feature-names": names, "R0": rec["R0"], "R0_source": rec["R0_source"],
             "ipsign": rec["ipsign"], "btsign": rec["btsign"],
-            "ta": ta, "tb": tb,
+            "ta": ta, "tb": tb, "clipped_to_eq_start": clipped_low,
             "badchi2": rec.get("badchi2"), "eqstat": rec.get("eqstat")}
 
 
@@ -352,18 +466,34 @@ def main():
                              a.use_alts, not a.no_glitch, a.min_timestamps)
             r["event"] = ann[s]["event"]
             out.append(r)
+            flag = "  [ta clipped to eq start]" if r["clipped_to_eq_start"] else ""
             print(f"{s}: {r['features'].shape[0]} slices x "
                   f"{r['features'].shape[1]} features, R0={r['R0']:.4f} "
-                  f"({r['R0_source']})")
+                  f"({r['R0_source']}){flag}")
         except Exception as e:
             dropped[s] = f"{type(e).__name__}: {e}"
             print(f"{s}: dropped -- {e}")
 
     print(f"\n{len(out)} kept, {len(dropped)} dropped")
     if out:
-        dt = np.median(np.diff(out[0]["time"]))
-        print(f"  slice cadence (shot {out[0]['shot']}): {1e3*dt:.3f} ms"
-              f"  <- this is the Delta in the hazard link")
+        dts = [np.median(np.diff(r["time"])) for r in out if r["time"].size > 1]
+        dt = float(np.median(dts))
+        tol = derived_tolerances(dt)
+        print(f"  cadence dt = {1e3*dt:.3f} ms  (spread "
+              f"{1e3*min(dts):.3f}-{1e3*max(dts):.3f})")
+        print(f"    dt is the Delta in h*Delta = softplus(f), the prediction")
+        print(f"    horizon, and the slice spacing -- one number, three roles.")
+        print(f"  derived tolerances: event_delta = {1e3*tol['event_delta']:.2f} ms,"
+              f"  merge delta = {1e3*tol['merge_delta']:.2f} ms")
+        cov = [(r["time"][0], r["time"][-1]) for r in out]
+        print(f"  equilibrium coverage: [{min(c[0] for c in cov):.5f}, "
+              f"{max(c[1] for c in cov):.5f}] s")
+        nearly = sum(1 for r in out
+                     if r["event"] and r["tb"] - r["time"][-1] > tol["event_delta"])
+        if nearly:
+            print(f"  WARNING {nearly} event shots have their last equilibrium more"
+                  f" than {1e3*tol['event_delta']:.1f} ms before the event -- those"
+                  f" labels would be dropped by table_stack")
     if a.out:
         with open(a.out, "wb") as f:
             pickle.dump({"records": out, "dropped": dropped, "tag": a.tag.upper()}, f)
