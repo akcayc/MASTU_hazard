@@ -28,9 +28,16 @@ import matplotlib
 matplotlib.use("Agg")          # cluster: no display
 import matplotlib.pyplot as plt
 
-# Categorical slots 1-3 of the validated reference palette, unmodified.
-# Documented as passing all-pairs in both modes (CVD dE 9.2, normal 24.0).
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]
+# Categorical slots of the validated reference palette, in fixed order, never
+# cycled.  Line charts are scored on the ADJACENT pairlist, on which all eight
+# slots pass in both modes (worst adjacent CVD dE 9.1 light / 8.4 dark, normal
+# vision 19.6 / 19.3).  The tighter all-pairs cap of three applies to scatter,
+# bubble and small multiples, not to this form.
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+          "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+
+#: direct labels stay legible up to four curves; past that the legend carries it
+MAX_DIRECT_LABELS = 4
 INK, INK2, INK3 = "#0b0b0b", "#52514e", "#8a8984"
 SURFACE, GRID = "#fcfcfb", "#e4e3de"
 
@@ -97,7 +104,12 @@ def main():
     a = p.parse_args()
     labels = a.labels or [f.rsplit("/", 1)[-1].replace(".csv", "") for f in a.csv]
     if len(a.csv) > len(SERIES):
-        raise SystemExit(f"at most {len(SERIES)} curves; fold the rest or facet")
+        raise SystemExit(
+            f"{len(a.csv)} curves requested but the categorical order has "
+            f"{len(SERIES)} slots, and a 9th series is never a generated hue. "
+            f"Fold the rest into a representative subset, or run the script "
+            f"twice and show the panels side by side.")
+    direct = len(a.csv) <= MAX_DIRECT_LABELS
 
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(8.6, 8.2), sharex=True,
@@ -117,15 +129,17 @@ def main():
 
         m = ev > 0
         ax1.plot(lv[m], ev[m], color=c, lw=2.0, solid_capstyle="round", zorder=3)
-        ax1.plot(lv[m][::6], ev[m][::6], "o", color=c, ms=4.5, mec=SURFACE,
+        off = (i * 2) % 6
+        ax1.plot(lv[m][off::6], ev[m][off::6], "o", color=c, ms=4.5, mec=SURFACE,
                  mew=1.2, zorder=4, label=lab)
         ax2.plot(lv, sl, color=c, lw=2.0, solid_capstyle="round", zorder=3)
 
-        if m.any():                       # deferred: placed after, destaggered
+        if m.any() and direct:            # deferred: placed after, destaggered
             ends.append([lv[m][-1], ev[m][-1], lab, c])
         if kn is not None:
-            ax1.axvline(kn, color=c, lw=1.0, ls=(0, (4, 3)), alpha=0.55, zorder=1)
-            ax2.axvline(kn, color=c, lw=1.0, ls=(0, (4, 3)), alpha=0.55, zorder=1)
+            al = 0.55 if direct else 0.30
+            ax1.axvline(kn, color=c, lw=1.0, ls=(0, (4, 3)), alpha=al, zorder=1)
+            ax2.axvline(kn, color=c, lw=1.0, ls=(0, (4, 3)), alpha=al, zorder=1)
 
         base = ev / dwell if dwell else np.full_like(ev, np.nan)
         for j in range(lv.size):
@@ -164,7 +178,10 @@ def main():
              f"dashed lines mark where each curve leaves its plateau",
              color=INK3, fontsize=9.5, ha="left")
     leg = ax1.legend(frameon=False, loc="lower left", fontsize=9.5,
-                     labelcolor=INK2, handletextpad=0.6)
+                     labelcolor=INK2, handletextpad=0.6,
+                     bbox_to_anchor=(0.015, 0.045),
+                     ncol=1 if len(a.csv) <= 4 else 2,
+                     columnspacing=1.6)
     leg.set_zorder(5)
 
     ax2.axhline(0, color=GRID, lw=1.0, zorder=1)
