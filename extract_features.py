@@ -81,6 +81,10 @@ def _get(client, tag, path, shot):
         t = np.asarray(v.time.data)
     except Exception:
         pass
+    if not hasattr(v, "data"):
+        # a container node (MAGNETICAXIS, CURRENTCENTROID): children only
+        kids = [k for k in dir(v) if not k.startswith("_")]
+        return None, None, f"container({','.join(kids[:4])})"
     units = getattr(v, "units", None)
     return np.asarray(v.data), t, units
 
@@ -99,8 +103,9 @@ def probe(shot, tag, client):
                 print(f"    {name:9s} -- no node defined")
                 continue
             r = _get(client, tag, path, shot)
-            if r is None:
-                print(f"    {name:9s} MISSING   {tag}/{path}")
+            if r is None or r[0] is None:
+                note = r[2] if r is not None else "MISSING"
+                print(f"    {name:9s} {note:9s} {tag}/{path}")
                 missing.append(f"{gname}.{name}")
                 continue
             d, t, u = r
@@ -123,8 +128,8 @@ def probe(shot, tag, client):
 
     def _val(path):
         r = _get(client, tag, path, shot)
-        if r is None:
-            return None, "missing"
+        if r is None or r[0] is None:
+            return None, (r[2] if r is not None else "missing")
         d = np.atleast_1d(np.asarray(r[0], float))
         fin = d[np.isfinite(d)]
         if fin.size == 0:
@@ -137,7 +142,7 @@ def probe(shot, tag, client):
         "BVACRGEOM":         "OUTPUT/GLOBALPARAMETERS/BVACRGEOM",
         "BVACRMAG":          "OUTPUT/GLOBALPARAMETERS/BVACRMAG",
         "RT":                "OUTPUT/GLOBALPARAMETERS/RT",
-        "MAGNETICAXIS":      "OUTPUT/GLOBALPARAMETERS/MAGNETICAXIS",
+        "MAGNETICAXIS/R":    "OUTPUT/GLOBALPARAMETERS/MAGNETICAXIS/R",
         "ZGEOM":             "OUTPUT/SEPARATRIXGEOMETRY/ZGEOM",
     }
     vals = {}
@@ -161,7 +166,7 @@ def probe(shot, tag, client):
 
     # independent cross-check from the boundary itself
     rb = _get(client, tag, NODES.SOURCES["rbdry"], shot)
-    if rb is not None:
+    if rb is not None and rb[0] is not None:
         R = np.atleast_2d(np.asarray(rb[0], float))
         R = np.where(R > 0, R, np.nan)
         with np.errstate(invalid="ignore"):
@@ -183,7 +188,7 @@ def fetch_record(shot, tag, client):
     rec = {"shot": int(shot), "tag": tag}
 
     tv = _get(client, tag, NODES.SOURCES["time"], shot)
-    if tv is None:
+    if tv is None or tv[0] is None:
         raise RuntimeError(f"no {tag}/TIME for shot {shot}")
     rec["time"] = np.asarray(tv[0], float)
     nt = rec["time"].size
@@ -192,7 +197,7 @@ def fetch_record(shot, tag, client):
 
     def need(group, name, path):
         r = _get(client, tag, path, shot)
-        if r is None:
+        if r is None or r[0] is None:
             raise RuntimeError(f"missing {group}.{name} ({tag}/{path})")
         d = np.asarray(r[0], float)
         # (6) time bases must agree -- no silent interpolation
@@ -225,12 +230,13 @@ def fetch_record(shot, tag, client):
         if p is None:
             continue
         r = _get(client, tag, p, shot)
-        if r is not None and np.asarray(r[0]).ndim == 1:
+        if r is not None and r[0] is not None and np.asarray(r[0]).ndim == 1:
             rec[n + "_scalar"] = np.asarray(r[0], float)
 
     for n, p in NODES.FLAGS.items():                 # optional
         r = _get(client, tag, p, shot)
-        rec[n] = np.asarray(r[0], float) if r is not None else None
+        rec[n] = (np.asarray(r[0], float)
+                  if r is not None and r[0] is not None else None)
 
     # external: line-integrated density, on its own time base
     try:
@@ -239,20 +245,13 @@ def fetch_record(shot, tag, client):
     except Exception:
         rec["ne_bar"] = None
 
-    # (7) reference major radius, asserted constant
-    rec["R0"] = None
-    for path in NODES.R0_CANDIDATES:
-        r = _get(client, tag, path, shot)
-        if r is None:
-            continue
-        d = np.atleast_1d(np.asarray(r[0], float))
-        if np.all(np.isfinite(d)) and np.ptp(d) / max(abs(np.mean(d)), 1e-12) < 1e-6:
-            rec["R0"] = float(d[0])
-            rec["R0_source"] = path
-            break
-    if rec["R0"] is None:
-        rec["R0"] = NODES.R0_FALLBACK
-        rec["R0_source"] = "fallback"
+    # (7) R0: a fixed machine convention, as DIII-D's RZERO is.  EPM has no
+    # fixed-R0 node -- BVACRADIUSPRODUCT/BVACRGEOM gives the geometric centre
+    # (0.858 m on 47002) and /BVACRMAG the magnetic axis (0.965 m), but both
+    # move with the plasma.  Normalising by a moving R0 would fold plasma
+    # motion into every length feature.
+    rec["R0"] = float(NODES.R0_FIXED)
+    rec["R0_source"] = "fixed convention"
     return rec
 
 

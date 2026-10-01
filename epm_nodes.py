@@ -81,25 +81,27 @@ SHAPING_SCALAR = {
     "tribot": "OUTPUT/SEPARATRIXGEOMETRY/LOWERTRIANGULARITY",
 }
 
-#: Reference major radius.  DIII-D reads RZERO and asserts it constant; every
-#: length feature is divided by it, so a wrong value rescales the entire
-#: geometric half of the feature set.
+#: Reference major radius.  Every length feature divides by it, so a wrong
+#: value rescales the whole geometric half of the set.
 #:
-#: On shot 47002 BOTH obvious candidates returned NaN -- RT and RMIDPLANEOUT
-#: resolve as nodes but carry no value.  BVACRADIUSPRODUCT is the B*R product
-#: at the reference radius, the same convention as DIII-D's BCENTR-at-RZERO,
-#: so R0 = BVACRADIUSPRODUCT / B_vac is the principled route if B_vac at that
-#: same radius can be identified.  Until that is settled, R0 falls back to the
-#: machine constant and the fallback is recorded per shot.
+#: There is NO fixed-R0 node in EPM.  Measured on shot 47002:
+#:     BVACRADIUSPRODUCT / BVACRGEOM = 0.858 m   (geometric centre)
+#:     BVACRADIUSPRODUCT / BVACRMAG  = 0.965 m   (magnetic axis)
+#: differing by 10.7 cm, a sensible Shafranov shift at ~0.6 m minor radius.
+#: Both vary with time because the plasma moves, so neither is an R0.
+#:
+#: DIII-D's RZERO is likewise a fixed machine convention, not a measurement --
+#: so R0 is fixed here too, at the nominal MAST-U major radius, which the
+#: measured geometric centre of 0.858 m corroborates to within 1%.
+R0_FIXED = 0.85         # m
+R0_FALLBACK = R0_FIXED  # kept for the older name
+
+#: R0 candidates are probed and reported, never used as the normalisation: a
+#: time-varying R0 would fold plasma motion into every length feature.
 R0_CANDIDATES = [
     "OUTPUT/GLOBALPARAMETERS/RT",
-    "INPUT/BVACRADIUSPRODUCT",          # B*R0; needs dividing by B at R0
+    "INPUT/BVACRADIUSPRODUCT",
 ]
-R0_FALLBACK = 0.85      # m, nominal MAST-U major radius
-
-#: cross-check: the median geometric centre (rmin+rmax)/2 over the campaign
-#: should sit near R0.  Reported, never used as the normalisation -- a
-#: time-varying R0 would fold plasma motion into every length feature.
 R0_CROSSCHECK = True
 
 #: non-EPM signals
