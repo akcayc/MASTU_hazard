@@ -13,6 +13,10 @@ venv/
 *.dropped.json
 rm_ladder*.csv
 mag_perturbations*.csv
+csv/
+pix/
+*.png
+*.pdf
 
 # LaTeX build artefacts
 *.aux
