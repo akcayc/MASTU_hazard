@@ -13,7 +13,7 @@ Checks three things:
 import _paths  # noqa: F401
 import numpy as np
 from saddle_data import SaddleFull, AmplitudeSelector
-from saddle_extras import amplitude_with_coherence
+from saddle_extras import amplitude_with_coherence, amplitude_diiid, hann_enbw
 
 NC, FS, T = 8, 200_000.0, 0.30
 F_MODE, N_MODE, T_ON = 10_000.0, 2, 0.15
@@ -115,6 +115,59 @@ def main():
             print(f"    {'PASS' if fell and held else 'FAIL'}  floor fell, "
                   f"signal held{note}")
         prev = (fn if np.isfinite(fn) else 0.0, fm)
+
+    # --- 5. |n|: either rotation sense must be detected ----------------------
+    # DIII-D selects on |n| (get_amplitude nsigned=False).  With both signs
+    # searched and absolute_n=True, the injected mode must be found whichever
+    # way it rotates, and the signed selection must still miss the wrong one.
+    print("\n  |n| selection, both signs searched")
+    both = np.array([-4, -3, -2, -1, 1, 2, 3, 4])
+    sel2 = AmplitudeSelector(ntor=N_MODE, **sel_kw)
+    for label, sign in [("sin(wt - n*phi)", -1), ("sin(wt + n*phi)", +1)]:
+        rm_b = build(sign=sign).spectrum(512).n_detection(both)
+        tt, _, _, Ba, coh = amplitude_with_coherence(rm_b, sel2, 0.6,
+                                                     absolute_n=True)
+        pre, post = tt < T_ON, tt > T_ON
+        c_mode = np.nanmedian(coh[post])
+        a_mode = np.nanmedian(Ba[post])
+        a_pre = np.nanmedian(Ba[pre]) if np.isfinite(Ba[pre]).any() else 0.0
+        good = (c_mode > 0.9) and (a_mode > 5 * a_pre)
+        ok &= good
+        print(f"    {'PASS' if good else 'FAIL'}  {label}: coh={c_mode:.3f}, "
+              f"|n|=2 amp {a_mode:.3g} vs pre-mode {a_pre:.3g}")
+    # signed selection of +2 only sees the matching handedness
+    amps = {}
+    for sign in (-1, +1):
+        rm_b = build(sign=sign).spectrum(512).n_detection(both)
+        tt, _, _, Ba, _ = amplitude_with_coherence(rm_b, sel2, 0.6)
+        amps[sign] = np.nanmedian(Ba[tt > T_ON]) if np.isfinite(Ba[tt > T_ON]).any() else 0.0
+    good = amps[-1] > 5 * amps[+1]
+    ok &= good
+    print(f"    {'PASS' if good else 'FAIL'}  signed +2 sees only one handedness "
+          f"({amps[-1]:.3g} vs {amps[+1]:.3g})")
+
+    # --- 6. DIII-D-form amplitude has the right ABSOLUTE scale ---------------
+    # Treat the synthetic data as dB/dt.  A per-coil sinusoid of peak a at f
+    # has RMS dB/dt a/sqrt(2), hence RMS B = a / (sqrt(2) * 2 pi f).  This is
+    # the check on the 2/ENBW and Parseval bookkeeping, and it uses an
+    # off-bin frequency (25.6 bins) so that window leakage is exercised.
+    print("\n  DIII-D-form amplitude, absolute scale")
+    expect = 20.0 / (np.sqrt(2) * 2 * np.pi * F_MODE)
+    for sign in (-1, +1):
+        rm_b = build(sign=sign).spectrum(512).n_detection(both)
+        tt, Bd = amplitude_diiid(rm_b, sel2, 0.6, absolute_n=True)
+        got = np.nanmedian(Bd[tt > T_ON + 0.02])
+        rel = got / expect - 1.0
+        good = abs(rel) < 0.05
+        ok &= good
+        print(f"    {'PASS' if good else 'FAIL'}  sign {sign:+d}: B_rms={got:.4g}"
+              f" expected {expect:.4g} ({100*rel:+.1f}%)")
+    # Giovannozzi's Ba differs by a fixed, computable factor for a line
+    rm_b = build(sign=-1).spectrum(512).n_detection(both)
+    tt, _, _, Ba_g, _ = amplitude_with_coherence(rm_b, sel2, 0.6, absolute_n=True)
+    ratio = np.nanmedian(Ba_g[tt > T_ON + 0.02]) / expect
+    print(f"    info  Gio Ba / true B_rms = {ratio:.3f} for this line "
+          f"(sqrt(ENBW/2) = {np.sqrt(hann_enbw(512)/2):.3f})")
 
     print("\n  NOTE  the opposite-handedness block is the important one: the")
     print("        coherence correctly collapses, yet the UNGATED amplitude")

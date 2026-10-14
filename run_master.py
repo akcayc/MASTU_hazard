@@ -72,10 +72,12 @@ except ImportError:
 # Still not an absolute calibration.  Giovannozzi: "I'm saying T and T/s but,
 # really, I'm not sure that the data I'm reading are in absolute units, so use
 # it for comparing shots."  So these gauss are consistent between shots --
-# which is all a ladder needs -- but carry an unverified O(1) factor from the
-# missing specgram window-power normalisation, and should not yet be compared
-# against published DIII-D numbers.  Settling that factor relabels every
-# column by one constant; no re-detection.
+# which is all a ladder needs -- but should not yet be compared against
+# published DIII-D numbers, because the OMAHA channel units are unconfirmed.
+# (specgram's own scaling is known: complex mode returns FFT/sum(w), so Gio's
+# Ba is sqrt(ENBW/2) = 0.867 of the true RMS on a line; --amp-form diiid
+# removes it.)  Settling the units relabels every column by one constant; no
+# re-detection.
 #
 # Log spacing because the usable range is wide: 1.8 mG to 0.30 G is 160x.
 # ---------------------------------------------------------------------------
@@ -118,8 +120,14 @@ def schmitt_first_crossing(time, signal, level, debounce=0.008):
 
 def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
                     ft_cfg=None, coherence_min=0.0, want_profiles=False,
-                    normalize_floor=False):
+                    normalize_floor=False, absolute_n=True,
+                    amp_form="gio"):
     """Fetch everything one shot contributes, on that shot's flat-top window.
+
+    absolute_n: traces are keyed by |n| and pool both senses of rotation, as
+    DIII-D does.  False keeps signed n.
+    amp_form: "gio" = Giovannozzi's Ba (band total / centroid frequency);
+    "diiid" = the DIII-D per-bin 1/omega^2 form, see saddle_extras.amplitude_diiid.
 
     Returns a dict; `ok` False means the shot is to be dropped, with `reason`
     saying why.  Nothing here thresholds or labels -- that is detect_ladder's
@@ -151,7 +159,7 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     ntor = np.array([n for n in (ntor_list or NTOR_DEFAULT) if n != 0])
     try:
         modes, meta = analyze_shot(shot, NFFT=NFFT, ntor=ntor,
-                                   coh_min=coherence_min)
+                                   coh_min=coherence_min, absolute_n=absolute_n)
     except Exception as e:
         out["reason"] = f"OMAHA: {e}"
         return out
@@ -165,7 +173,8 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     # would overstate the dwell time, biasing the base hazard downward at
     # exactly the late times where accumulated-stress events live.  An event
     # after the record ends is a censored shot, not an eventless one.
-    t_omaha = modes[int(ntor[0])]["time"]
+    keys = sorted(modes)             # |n| when absolute_n, else signed n
+    t_omaha = modes[keys[0]]["time"]
     if t_omaha.size < 2:
         out["reason"] = "empty OMAHA time base"
         return out
@@ -183,10 +192,11 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     # normalised detector trace, per n, restricted to the flat-top window and
     # gated on the toroidal-fit coherence.
     traces = {}
-    for n in ntor:
+    for n in keys:
         m = modes[n]
-        t, amp, coh = m["time"], np.asarray(m["amp"], float), np.asarray(m["coherence"], float)
-        floor = m["noise_floor"]
+        key = "amp_diiid" if amp_form == "diiid" else "amp"
+        t, amp, coh = m["time"], np.asarray(m[key], float), np.asarray(m["coherence"], float)
+        floor = m["noise_floor_diiid" if amp_form == "diiid" else "noise_floor"]
         if not np.isfinite(floor) or floor <= 0:
             floor = noise_floor(t, amp, t_pre=min(0.020, max(t_a * 0.5, 1e-3)))
         if not np.isfinite(floor) or floor <= 0:
@@ -253,14 +263,19 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008):
 
 def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       t_start=0.2, n_detect=1, debounce=0.008,
-                      coherence_min=0.0, ft_cfg=None, normalize_floor=False):
+                      coherence_min=0.0, ft_cfg=None, normalize_floor=False,
+                      absolute_n=True, amp_form="gio"):
     """Run the detector over `shots` and return the ladder table."""
     ladder = DEFAULT_LADDER if ladder is None else np.asarray(ladder)
 
     # The ladder triggers on one n, which must be among those analysed --
     # otherwise every row comes back NaN and the cause is invisible.  Check
-    # before touching the database, not per shot.
+    # before touching the database, not per shot.  With absolute_n the sign is
+    # immaterial: --n-detect 1 and --n-detect -1 both mean |n| = 1.
     ntor = [n for n in (ntor_list or NTOR_DEFAULT) if n != 0]
+    if absolute_n:
+        ntor = sorted({abs(int(n)) for n in ntor})
+        n_detect = abs(int(n_detect))
     if int(n_detect) not in [int(n) for n in ntor]:
         raise ValueError(
             f"--n-detect {n_detect} is not in --n-tor {sorted(int(n) for n in ntor)}. "
@@ -273,7 +288,8 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
     for shot in shots:
         sig = collect_signals(shot, client, t_start=t_start, ntor_list=ntor_list,
                               NFFT=NFFT, ft_cfg=ft_cfg, coherence_min=coherence_min,
-                              normalize_floor=normalize_floor)
+                              normalize_floor=normalize_floor,
+                              absolute_n=absolute_n, amp_form=amp_form)
         if not sig["ok"]:
             dropped[shot] = sig["reason"]
             print(f"{shot}: dropped -- {sig['reason']}")
@@ -295,7 +311,7 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
 def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                NFFT=512, t_start=0.2, out_csv=None, coherence_min=0.0,
                debounce=0.008, n_detect=1, normalize_floor=False,
-               ladder_spec=None):
+               ladder_spec=None, absolute_n=True, amp_form="gio"):
     client = pyuda.Client()
     outputs = {}
 
@@ -310,7 +326,8 @@ def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                                 ntor_list=ntor_list, NFFT=NFFT, t_start=t_start,
                                 n_detect=n_detect, debounce=debounce,
                                 coherence_min=coherence_min,
-                                normalize_floor=normalize_floor)
+                                normalize_floor=normalize_floor,
+                                absolute_n=absolute_n, amp_form=amp_form)
         outputs["detector"] = det
         if out_csv:
             det["table"].to_csv(out_csv, index=False)
@@ -330,7 +347,14 @@ def main():
     parser.add_argument("--n-tor", type=int, nargs="+", default=NTOR_DEFAULT,
                         help="toroidal mode numbers to search; both signs")
     parser.add_argument("--n-detect", type=int, default=1,
-                        help="toroidal mode number the ladder triggers on")
+                        help="toroidal mode number the ladder triggers on "
+                             "(|n| unless --signed-n)")
+    parser.add_argument("--amp-form", choices=["gio", "diiid"], default="gio",
+                        help="amplitude estimator: Giovannozzi's band-total / "
+                             "centroid, or the DIII-D per-bin 1/omega^2 form")
+    parser.add_argument("--signed-n", action="store_true",
+                        help="select on signed n instead of |n|; the default "
+                             "pools +n and -n, as DIII-D does")
     parser.add_argument("--t-start", type=float, default=0.2)
     parser.add_argument("--debounce", type=float, default=0.008,
                         help="trigger confirmation time [s]")
@@ -371,6 +395,8 @@ def main():
         n_detect=args.n_detect,
         normalize_floor=args.normalize_floor,
         ladder_spec=(args.ladder_min, args.ladder_max, args.ladder_num),
+        absolute_n=not args.signed_n,
+        amp_form=args.amp_form,
     )
 
 

@@ -93,21 +93,16 @@ from saddle_analysis import (
 COHERENCE_GATE_SUGGESTED = 0.6
 
 
-def amplitude_with_coherence(rm, sel: AmplitudeSelector, coh_min=0.0):
-    """RecognizedModes.amplitude() plus the power-weighted coherence.
+def _select_bins(rm, sel: AmplitudeSelector, coh_min, absolute_n):
+    """The (time, freq) bins that count toward sel.ntor, and their coherence.
 
-    Mirrors the upstream method exactly for amplitude and frequency, then
-    reduces rm.coherence over the same (time, freq) selection and n-mask:
-
-        coh(t) = sum_f coherence(f,t) P(f,t) / sum_f P(f,t)
-
-    Returns (time, freq, Bp, Ba, coh), coh in [0, 1], NaN where no bin
-    survived the mask.
+    Shared by both amplitude estimators so that they sum over exactly the
+    same bins.  Returns (tsel, Fsel, power, id_mask, coh), id_mask True =
+    excluded; or None for a record too short to analyse.
     """
     F, time = rm.freq, rm.time
     if time.size < 2:
-        z = np.zeros(0)
-        return z, z, z, z, z
+        return None
 
     f_min, f_max = min(sel.f_min), max(sel.f_max)
     t_min, t_max = min(sel.time), max(sel.time)
@@ -125,9 +120,19 @@ def amplitude_with_coherence(rm, sel: AmplitudeSelector, coh_min=0.0):
                                     tsel, Fsel, power_spectrum)
 
     # per-bin coherence for this n, over the same selection
-    match = np.flatnonzero(np.asarray(rm.n_tor_searched) == sel.ntor)
-    coh = (rm.coherence[int(match[0])].T[:, idf][idt, :] if match.size
-           else np.full(power_spectrum.shape, np.nan))
+    searched = np.asarray(rm.n_tor_searched)
+    if absolute_n:
+        n_abs = abs(int(sel.ntor))
+        coh = np.full(power_spectrum.shape, np.nan)
+        for s in (n_abs, -n_abs):
+            m = np.flatnonzero(searched == s)
+            if m.size:
+                c_s = rm.coherence[int(m[0])].T[:, idf][idt, :]
+                coh = np.where(Ntor == s, c_s, coh)
+    else:
+        match = np.flatnonzero(searched == sel.ntor)
+        coh = (rm.coherence[int(match[0])].T[:, idf][idt, :] if match.size
+               else np.full(power_spectrum.shape, np.nan))
 
     # The gate belongs INSIDE the frequency sum, as in DIII-D's get_amplitude:
     # a bin that fails coherence must contribute zero to the amplitude, not
@@ -136,9 +141,38 @@ def amplitude_with_coherence(rm, sel: AmplitudeSelector, coh_min=0.0):
     # irreducible floor (~1.8 mG on the OMAHA subset) that no gate setting can
     # lower -- which is what made a 0.2 gate fire on every low rung and a 0.8
     # gate fire on nothing.
-    id_mask = Ntor != sel.ntor
+    id_mask = (np.abs(Ntor) != abs(int(sel.ntor))) if absolute_n \
+        else (Ntor != sel.ntor)
     if coh_min > 0:
         id_mask = id_mask | ~(np.isfinite(coh) & (coh >= coh_min))
+
+    return tsel, Fsel, power_spectrum, id_mask, coh
+
+
+def amplitude_with_coherence(rm, sel: AmplitudeSelector, coh_min=0.0,
+                             absolute_n=False):
+    """RecognizedModes.amplitude() plus the power-weighted coherence.
+
+    Mirrors the upstream method exactly for amplitude and frequency, then
+    reduces rm.coherence over the same (time, freq) selection and n-mask:
+
+        coh(t) = sum_f coherence(f,t) P(f,t) / sum_f P(f,t)
+
+    absolute_n=True selects on |n| instead of signed n, as DIII-D does
+    (modespyec `abolute-n`, i.e. get_amplitude(nsigned=False)): a bin counts
+    toward |sel.ntor| if the argmax assigned it +|n| or -|n|, so a mode counts
+    whichever way it rotates.  The coherence gate reads the row of the sign
+    the bin was actually assigned.  With False (default) the result is
+    bit-identical to the upstream method, which check_equivalence.py asserts.
+
+    Returns (time, freq, Bp, Ba, coh), coh in [0, 1], NaN where no bin
+    survived the mask.
+    """
+    sel_ = _select_bins(rm, sel, coh_min, absolute_n)
+    if sel_ is None:
+        z = np.zeros(0)
+        return z, z, z, z, z
+    tsel, Fsel, power_spectrum, id_mask, coh = sel_
 
     power_masked = np.ma.array(power_spectrum, mask=id_mask)
     power_sum = power_masked.sum(axis=1)
@@ -154,6 +188,57 @@ def amplitude_with_coherence(rm, sel: AmplitudeSelector, coh_min=0.0):
     coh_w = ((coh_masked * power_masked).sum(axis=1) / power_sum).filled(np.nan)
 
     return tsel, Fa, Bp, Ba, coh_w
+
+
+def hann_enbw(nfft):
+    """Equivalent noise bandwidth of the Hann window, in bins: N sum(w^2)/sum(w)^2.
+
+    1.5 for large N.  Converts the spectrum that matplotlib's specgram returns
+    to an RMS amplitude, see amplitude_diiid.
+    """
+    w = np.hanning(nfft)
+    return float(nfft * np.sum(w * w) / np.sum(w) ** 2)
+
+
+def amplitude_diiid(rm, sel: AmplitudeSelector, coh_min=0.0, absolute_n=True):
+    """RMS field amplitude [input units * s], in the DIII-D form.
+
+    DIII-D (modespyec.get_amplitude, integrated=True) converts dB/dt to B one
+    bin at a time:
+
+        A = Ts * sqrt( ff * sum_f  W(f) / omegahat_f^2 * 0.5 (X11 + X22) )
+
+    with omegahat = omega * Ts and ff = 2 / (sum(w^2) * nfft), which makes
+    ff * sum|X|^2 an RMS.  Giovannozzi's Ba divides the band total by one
+    power-weighted centroid frequency instead, which agrees only for a
+    narrowband mode.
+
+    Here X = FFT(w x), but matplotlib's specgram(mode='complex') returns
+    S = X / sum(w).  Substituting,
+
+        A^2 = (2 / ENBW) * sum_f  W(f) P(f) / omega_f^2 ,   P = mean_c |S_c|^2
+
+    ENBW = N sum(w^2) / sum(w)^2 being 1.5 for Hann.  A pure sinusoid of
+    peak amplitude a then gives a / sqrt(2) whatever the leakage, which
+    tests/test_coherence.py checks.  W is the same gated, |n|-selected bin set
+    that amplitude_with_coherence sums over -- both call _select_bins.
+
+    Assumes specgram's defaults (Hann window, no detrend, complex scaled by
+    sum(w)); true of matplotlib >= 1.x.  If the input is dB/dt in T/s this
+    is B in tesla; if it is anything else the number is only relative.
+
+    Returns (time, B_rms), NaN where no bin survived.
+    """
+    sel_ = _select_bins(rm, sel, coh_min, absolute_n)
+    if sel_ is None:
+        z = np.zeros(0)
+        return z, z
+    tsel, Fsel, power, id_mask, _ = sel_
+    nfft = 2 * (rm.freq.size - 1)          # one-sided spectrum: N/2 + 1 bins
+    omega = 2.0 * np.pi * Fsel             # Fsel > 0: bin 0 is excluded upstream
+    weighted = np.ma.array(power / omega ** 2, mask=id_mask).sum(axis=1)
+    B2 = (2.0 / hann_enbw(nfft)) * weighted
+    return tsel, np.sqrt(B2).filled(np.nan)
 
 
 def noise_floor(time, values, t_pre=0.020):
@@ -173,8 +258,13 @@ def noise_floor(time, values, t_pre=0.020):
 
 def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
                  freq_min=None, freq_max=None, v_min=VMIN_DEFAULT,
-                 t_pre=0.020, out=None, coh_min=0.0):
+                 t_pre=0.020, out=None, coh_min=0.0, absolute_n=True):
     """Per-shot analysis with coherence and noise floor.
+
+    absolute_n=True (default, as DIII-D): per_n is keyed by |n|, and each entry
+    pools the +|n| and -|n| bins.  Both signs are always searched, whatever
+    `ntor` holds, since a bin must be able to be assigned to either.
+    absolute_n=False keeps the signed keys of the original routine.
 
     Returns (per_n, meta):
         per_n[n] = {amp, damp_dt, freq, time, coherence, noise_floor, LMlabels}
@@ -210,15 +300,26 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
     if sd.time.size < 2:
         raise RuntimeError(f"no OMAHA data for shot {shot}")
 
+    if absolute_n:
+        mags = sorted({abs(int(n)) for n in ntor if int(n) != 0})
+        search = [s * m for m in mags for s in (-1, 1)]
+        ntor = mags
+    else:
+        search = [int(n) for n in ntor]
+
     sp = sd.spectrum(NFFT)
-    rm = sp.n_detection(np.asarray(ntor))
+    rm = sp.n_detection(np.asarray(search))
 
     for n in ntor:
         n = int(n)
         sel = AmplitudeSelector(n, time_interval, freq_min, freq_max, v_min)
-        t, freq, Bp, Ba, coh = amplitude_with_coherence(rm, sel, coh_min)
+        t, freq, Bp, Ba, coh = amplitude_with_coherence(rm, sel, coh_min,
+                                                        absolute_n=absolute_n)
+        _, Bd = amplitude_diiid(rm, sel, coh_min, absolute_n=absolute_n)
         per_n[n] = {
             "amp": Ba,
+            "amp_diiid": Bd,
+            "noise_floor_diiid": noise_floor(t, Bd, t_pre),
             "damp_dt": Bp,
             "freq": freq,
             "time": t,
@@ -231,6 +332,8 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
         "shot": shot,
         "NFFT": NFFT,
         "ntor": [int(n) for n in ntor],
+        "ntor_searched": [int(n) for n in search],
+        "absolute_n": bool(absolute_n),
         "n_coils": int(sd.phi.size),
         "phi": np.asarray(sd.phi),
         "fs_hz": float(1.0 / np.mean(np.diff(sd.time))) if sd.time.size > 1 else np.nan,

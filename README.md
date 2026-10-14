@@ -25,6 +25,7 @@ recomputation over the database.
 | `saddle_analysis.py` | Original OMAHA routine, four defects repaired. `saddle_analysis_one_shot`, `run_batch` |
 | `saddle_extras.py` | Additions. `amplitude_with_coherence`, `noise_floor`, `analyze_shot`, `NTOR_BOTH_SIGNS` |
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
+| `probe_omaha.py` | Prints OMAHA channel units/description and any calibration column in `omaha_coils` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
 | `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
 | `make_annotation.py` | Ladder CSV + a threshold -> the 7-column survival table |
@@ -163,9 +164,15 @@ run_master.main()
 and T/s but, really, I'm not sure that the data I'm reading are in absolute
 units, so use it for comparing shots."* So the scale is consistent and
 shot-to-shot comparison is valid — which is all a threshold ladder needs — but
-a threshold cannot be quoted as a field or compared against DIII-D. `specgram`
-also applies no window-power or sample-rate normalisation, so an O(1) factor is
-unaccounted for on top.
+a threshold cannot be quoted as a field or compared against DIII-D.
+
+The FFT bookkeeping, at least, is now pinned down. `specgram(mode='complex')`
+returns `FFT(w x) / sum(w)` — an amplitude normalisation, not none — so for a
+narrowband line Giovannozzi's `Ba` is `sqrt(ENBW/2) = 0.867` of the true RMS
+field, *if* the input is calibrated dB/dt in T/s. `amplitude_diiid` removes
+that factor and the centroid-frequency approximation, and reproduces a known
+synthetic amplitude to 0.1% (`tests/test_coherence.py`). What stays open is the
+input's units and calibration, which no formula can fix.
 
 The ladder is therefore **absolute, in gauss** (`GAUSS_PER_TESLA = 1.0e4`,
 the same convention as the DIII-D detector). An earlier
@@ -188,10 +195,12 @@ The tesla reading is settled by plausibility: as stored, the noise floor is
 a 0.30 G peak, which is what saddle coils should see. The default ladder spans
 2 mG to 0.3 G in 61 log-spaced steps.
 
-These gauss still carry the unverified O(1) factor from the missing `specgram`
-window-power normalisation, so they are comparable between your shots but not
-yet against DIII-D's 1–30 G. Settling that factor relabels every column by one
-constant, with no re-detection.
+These gauss are comparable between your shots, but not yet against DIII-D's
+1–30 G until the OMAHA channel units are confirmed. `--amp-form diiid` selects
+the DIII-D per-bin 1/ω² estimator (`--amp-form gio`, the default, is
+Giovannozzi's). The two differ by a constant 0.867 on a pure line and more on a
+broadband spectrum; compare them on the same shots before choosing. Either way
+the ladder levels are relabelled by one constant, with no re-detection.
 
 **Toroidal handedness.** `Spectra.n_detection` projects onto `exp(+i n phi)`,
 so it detects modes whose spectral phase runs as `exp(-i n phi)`. A mode of the
@@ -200,6 +209,17 @@ inflates the *ungated* amplitude of every n at once. `NTOR_DEFAULT` therefore
 carries both signs, matching Giovannozzi's instruction that `n_detection` takes
 *"a list of toroidal mode number (positive and negative)"*. Which half carries
 the coherence tells you the sense of rotation. See `docs/` §9.6.
+
+**The detector selects on |n|, as DIII-D does** (`abolute-n` in `modespyec`,
+i.e. `get_amplitude(nsigned=False)`). `analyze_shot(absolute_n=True)` always
+searches both signs, keys its output by |n|, and pools the bins the argmax
+assigned to `+|n|` or `-|n|`; the coherence gate reads the row of whichever sign
+each bin was assigned. `--n-detect 1` therefore means |n| = 1 whatever the sense
+of rotation. `--signed-n` restores the old signed selection for comparison, and
+`amplitude_with_coherence(absolute_n=False)` remains bit-identical to upstream.
+The ladder's `whichn` column is |n|. Note the 5-coil OMAHA subset spans only
+~60° of toroidal angle, so |n| = 1 vs 2 aliasing, not the sign, is the residual
+risk.
 
 ## The coherence gate goes inside the frequency sum
 
