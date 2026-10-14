@@ -27,6 +27,12 @@ recomputation over the database.
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
 | `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
+| `make_annotation.py` | Ladder CSV + a threshold -> the 7-column survival table |
+| `extract_features.py` | EPM/EPQ descriptor extraction; `--probe` checks node availability |
+| `extract_parallel.py` | Threaded, resumable driver for the above |
+| `checkpoint.py` | Chunked append-only store; atomic writes, resume on restart |
+| `epm_nodes.py` | MAST-U node map, DIII-D feature -> EPM path |
+| `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
 | `tests/` | Offline test suite; runs without Freya |
@@ -43,6 +49,43 @@ Offline, anywhere — no database needed:
 ```bash
 python tests/run_offline_tests.py
 ```
+
+Everything at once:
+
+```bash
+./run-study.sh GATE-060 0.60
+```
+
+Each stage is skipped if its output exists, so a rerun resumes. Parameters are
+pinned to the folder on first run and checked on every later one — a mismatched
+gate is a hard error, so a folder cannot mix settings. `PARALLEL_TAGS=true`
+harvests EPM and EPQ concurrently; `SHOT_MIN`, `SHOT_MAX`, `WORKERS` and
+`N_DETECT` are environment overrides.
+
+Three folders give the gate sensitivity scan, the analogue of DIII-D's
+`POINT-A` … `POINT-F`:
+
+```bash
+./run-study.sh GATE-055 0.55
+./run-study.sh GATE-060 0.60
+./run-study.sh GATE-070 0.70
+```
+
+Or the same steps by hand:
+
+```bash
+python run_master.py --shots $(seq 47000 47099) --build-detector \
+    --coherence-min 0.60 --out-csv rm_ladder.csv      # detector -> ladder
+python ladder_base_rate.py rm_ladder.csv              # find the knee
+python plot_ladder.py rm_ladder.csv --out scan        # figures
+python make_annotation.py rm_ladder.csv --threshold <knee> --out joint.csv
+python extract_parallel.py --annotation joint.csv --tag EPM \
+    --store harvest_EPM --workers 8                   # features
+python extract_parallel.py --store harvest_EPM --consolidate feat_EPM.pickle
+```
+
+The threshold enters only at `make_annotation`, so changing your mind means
+redoing the last three steps, not the detector.
 
 On Freya, in order:
 
@@ -220,11 +263,44 @@ The simulated noise floor (median 0.402 on this geometry) sits *above* the
 observed median of 0.279, so the simulation is a conservative white-noise
 idealisation — real leakage is lower than the table says, not higher.
 
+## Feature extraction
+
+Every DIII-D descriptor has an EPM counterpart, including `S1`/`S2`/`S3` (so
+`glitch` is computable) and `FINALCHISQUARED` / `FINALPOLOIDALFLUXERROR`. Run
+`--probe` on one shot after any node-map edit; it reports shape, units and time
+base per node, and has already caught three things a sweep would only have
+surfaced hours in.
+
+**Cadence.** EPM writes 200 slices over [0.020, 1.020] s, so dt = 5.03 ms —
+four times finer than the DIII-D grid the tolerances were tuned on. Both are
+derived from the measured cadence rather than inherited: `event_delta` = 2
+slices = 10.05 ms, merge delta = dt/4 = 1.26 ms. dt is simultaneously the slice
+spacing, the prediction horizon, and the Delta in `h*Delta = softplus(f)`.
+
+**R0 = 0.85 m, fixed by convention.** EPM has no fixed-R0 node;
+`BVACRADIUSPRODUCT/BVACRGEOM` gives the geometric centre (0.858 m on 47002) and
+`/BVACRMAG` the magnetic axis (0.965 m), but both move with the plasma, and
+normalising by a moving radius would fold plasma motion into every length
+feature. DIII-D's `RZERO` is likewise a convention, not a measurement.
+
+**The chop is at `tevent`, and must be.** `table_stack` labels the last row of
+each shot precisely because that row is the last pre-event slice. `--ladder`
+extracts the unchopped flat-top window instead, which lets one harvest serve
+several thresholds — but then the stacking step must do the chop, and that is
+the one place a bug mislabels everything without erroring. At 33 ms/read with
+8 workers a re-harvest is ~40 min per tag, so it rarely pays.
+
+**Timing.** Measured on Freya: 33 ms per node read, 29 reads per shot, 0.96
+s/shot. 10,000 shots across EPM and EPQ is 5.3 h serial. The time is network
+latency, not computation, so threads help nearly linearly; `extract_parallel`
+gives each worker its own pyuda client and checkpoints through `ChunkStore`,
+so a run that dies resumes where it stopped.
+
 ## Not yet written
 
 Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectral
-detector cannot see a DC island); joint annotation and pathway model; EPM/EPQ
-feature extraction; the matched-time-base merge; the hazard model itself.
+detector cannot see a DC island); the EPM/EPQ merge on matched time bases; the
+survival table; the hazard model itself.
 
 EPQ and EPM appear to be the MAST-U counterparts of EFIT02 and EFIT01, so the
 matched-pair machinery should port with little change.

@@ -118,67 +118,6 @@ def probe(shot, tag, client):
         except Exception as e:
             print(f"  [external] {name:9s} MISSING  {path}  ({type(e).__name__})")
             missing.append(f"external.{name}")
-    # --- R0 ---------------------------------------------------------------
-    # Every length feature divides by R0, so a wrong value rescales the whole
-    # geometric half of the set.  RT and RMIDPLANEOUT resolve but read NaN on
-    # 47002, so try the B*R route: BVACRADIUSPRODUCT is the product at the
-    # reference radius (DIII-D's BCENTR-at-RZERO convention), and dividing it
-    # by the vacuum field quoted at a named radius recovers that radius.
-    print("\n  [R0]")
-
-    def _val(path):
-        r = _get(client, tag, path, shot)
-        if r is None or r[0] is None:
-            return None, (r[2] if r is not None else "missing")
-        d = np.atleast_1d(np.asarray(r[0], float))
-        fin = d[np.isfinite(d)]
-        if fin.size == 0:
-            return None, "all NaN"
-        const = np.ptp(fin) / max(abs(np.mean(fin)), 1e-12) < 1e-6
-        return fin, ("constant" if const else f"varies {fin.min():.4f}..{fin.max():.4f}")
-
-    probes = {
-        "BVACRADIUSPRODUCT": "INPUT/BVACRADIUSPRODUCT",
-        "BVACRGEOM":         "OUTPUT/GLOBALPARAMETERS/BVACRGEOM",
-        "BVACRMAG":          "OUTPUT/GLOBALPARAMETERS/BVACRMAG",
-        "RT":                "OUTPUT/GLOBALPARAMETERS/RT",
-        "MAGNETICAXIS/R":    "OUTPUT/GLOBALPARAMETERS/MAGNETICAXIS/R",
-        "ZGEOM":             "OUTPUT/SEPARATRIXGEOMETRY/ZGEOM",
-    }
-    vals = {}
-    for nm, path in probes.items():
-        v, note = _val(path)
-        vals[nm] = v
-        shown = f"{np.median(v):.5f}" if v is not None else "--"
-        print(f"    {nm:18s} {shown:>10s}   {note}")
-
-    br = vals.get("BVACRADIUSPRODUCT")
-    for nm in ("BVACRGEOM", "BVACRMAG"):
-        b = vals.get(nm)
-        if br is not None and b is not None:
-            n = min(br.size, b.size)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                R = np.asarray(br[-n:], float) / np.asarray(b[-n:], float)
-            R = R[np.isfinite(R)]
-            if R.size:
-                print(f"    BVACRADIUSPRODUCT / {nm:11s} -> R = {np.median(R):.5f} m"
-                      f"  (spread {R.min():.5f}..{R.max():.5f})")
-
-    # independent cross-check from the boundary itself
-    rb = _get(client, tag, NODES.SOURCES["rbdry"], shot)
-    if rb is not None and rb[0] is not None:
-        R = np.atleast_2d(np.asarray(rb[0], float))
-        R = np.where(R > 0, R, np.nan)
-        with np.errstate(invalid="ignore"):
-            rgeo = (np.nanmin(R, axis=1) + np.nanmax(R, axis=1)) / 2.0
-        rgeo = rgeo[np.isfinite(rgeo)]
-        if rgeo.size:
-            print(f"    geometric centre (rmin+rmax)/2  -> {np.median(rgeo):.5f} m"
-                  f"  (spread {rgeo.min():.5f}..{rgeo.max():.5f})")
-    print(f"    fallback currently in use       -> {NODES.R0_FALLBACK:.5f} m")
-    print("    Pick the candidate that is CONSTANT and physically sensible;"
-          "\n    a time-varying R0 would fold plasma motion into every length.")
-
     print(f"\n  {len(missing)} missing: {missing}" if missing else "\n  all nodes resolved")
     return missing
 
@@ -312,11 +251,6 @@ def derive(rec):
             rec[nm + "_b"] = v[:, -1] if v.ndim == 2 else v
             rec[nm + "_b_source"] = "profile[:, -1]"
 
-    # R0 cross-check: the geometric centre should sit near the fixed R0 used
-    # for normalisation.  Reported only -- a time-varying R0 would fold plasma
-    # motion into every length feature.
-    rgeo = (bbox[:, 0] + bbox[:, 1]) / 2.0
-    rec["rgeo_median"] = float(np.nanmedian(rgeo)) if np.isfinite(rgeo).any() else np.nan
     return rec
 
 
