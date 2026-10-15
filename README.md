@@ -26,6 +26,7 @@ recomputation over the database.
 | `saddle_extras.py` | Additions. `amplitude_with_coherence`, `noise_floor`, `analyze_shot`, `NTOR_BOTH_SIGNS` |
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
 | `compare_lf_hf.py` | Transfer function slow(LF)/fast(HF) on one coil: same quantity, time integral, or derivative |
+| `probe_timebase.py` | OMAHA slow time-step distribution, where non-uniformity sits, and what `load_omaha`'s slice keeps |
 | `probe_omaha.py` | Prints OMAHA channel units/description and any calibration column in `omaha_coils` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
 | `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
