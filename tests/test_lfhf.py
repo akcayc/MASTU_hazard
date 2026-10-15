@@ -17,7 +17,7 @@ N_TONES = 220
 _FAST = {}
 
 
-def build(kind, seed=0):
+def build(kind, seed=0, lag=0.0):
     rng = np.random.default_rng(seed)
     f_k = rng.uniform(1.5e3, 45e3, N_TONES)
     a_k = rng.uniform(0.5, 1.5, f_k.size)
@@ -25,6 +25,7 @@ def build(kind, seed=0):
     tf = np.arange(T0, T1, 1 / FS_F)
     # slow stamps carry a sub-sample offset, as two digitisers' clocks would
     ts = np.arange(T0, T1, 1 / FS_S) + 0.37 / FS_S
+    tsl = ts - lag          # slow(t) = fast(t - lag): slow is `lag` behind
 
     def tones(t, gain, shift):
         out = np.zeros(t.size)
@@ -39,13 +40,13 @@ def build(kind, seed=0):
         _FAST[seed] = tones(tf, one, zero)
     xf = _FAST[seed]
     if kind == "same":
-        ys = tones(ts, 2.0 * one, zero)                       # gain 2
+        ys = tones(tsl, 2.0 * one, zero)                      # gain 2
     elif kind == "integral":
-        ys = tones(ts, 1 / (2 * np.pi * f_k) * 1e4, zero - np.pi / 2)
+        ys = tones(tsl, 1 / (2 * np.pi * f_k) * 1e4, zero - np.pi / 2)
     elif kind == "derivative":
-        ys = tones(ts, 2 * np.pi * f_k * 1e-4, zero + np.pi / 2)
+        ys = tones(tsl, 2 * np.pi * f_k * 1e-4, zero + np.pi / 2)
     elif kind == "flipped":
-        ys = tones(ts, -1.0 * one, zero)
+        ys = tones(tsl, -1.0 * one, zero)
     rng2 = np.random.default_rng(seed + 1)
     return tf, xf + 0.05 * rng2.normal(size=tf.size), ts, ys + 0.05 * rng2.normal(size=ts.size)
 
@@ -72,6 +73,19 @@ def main():
     ok &= good
     print(f"  {'PASS' if good else 'FAIL'}  flat-band gain recovered "
           f"({v['gain']:.3f} vs 2.000)")
+
+    # a clock offset between the digitisers: without the delay search this
+    # reads "no common signal", which is exactly the failure to guard against
+    for lag in (3.1e-3, -8.0e-3):
+        tf, xf, ts, ys = build("same", lag=lag)
+        res = transfer(tf, xf, ts, ys, T0 + 0.02, T1 - 0.02)
+        v = verdict(res)
+        good = (v["kind"] == "same quantity (flat gain)"
+                and abs(res["delay"] - lag) < 10e-6
+                and abs(v["gain"] / 2.0 - 1) < 0.05)
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  slow {1e3*lag:+.1f} ms behind -> "
+              f"found {1e3*res['delay']:+.3f} ms, {v['kind']}")
 
     # no common signal: independent noise must NOT be reported as a relation
     rng = np.random.default_rng(5)

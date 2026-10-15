@@ -31,53 +31,98 @@ BAND = (1.0e3, 30.0e3)            # where the slope and phase are judged
 COH_OK = 0.8                      # bins below this carry no common signal
 
 
-def to_slow_grid(t_fast, x_fast, t_slow, t0, t1):
-    """Fast signal, low-passed and resampled onto the slow channel's time stamps.
+def decimate_fast(t_fast, x_fast, t0, t1):
+    """Fast signal low-passed and decimated to 200 kHz over [t0, t1].
 
-    The fast channel is decimated to 200 kHz with a zero-phase FIR first, so
-    nothing above 100 kHz aliases into the band, then interpolated (cubic) to
-    the slow channel's exact sample times.  Zero-phase keeps any real latency
-    in the LF path visible as a phase slope instead of hiding it.
+    Zero-phase FIR, so nothing above 100 kHz aliases into the band and any
+    real latency in the LF path stays visible as a phase slope.  Returns the
+    decimated time stamps and values (a uniform 200 kHz grid).
     """
     t_fast, x_fast = np.asarray(t_fast, float), np.asarray(x_fast, float)
-    m = (t_fast >= t0 - 1e-3) & (t_fast <= t1 + 1e-3)
-    t_f, x_f = t_fast[m], x_fast[m]
-    fs_fast = 1.0 / np.median(np.diff(t_f))
+    m = (t_fast >= t0) & (t_fast <= t1)
+    t_d, x_d = t_fast[m], x_fast[m]
+    if t_d.size < 100:
+        raise ValueError(f"fast channel has {t_d.size} samples in "
+                         f"[{t0:.3f}, {t1:.3f}] s")
+    fs_fast = 1.0 / np.median(np.diff(t_d))
     q = int(round(fs_fast / FS_SLOW))
     if q < 1 or abs(fs_fast / q - FS_SLOW) > 0.01 * FS_SLOW:
         raise ValueError(f"fast rate {fs_fast/1e3:.1f} kHz is not an integer "
                          f"multiple of {FS_SLOW/1e3:.0f} kHz")
-    x_f = x_f - np.mean(x_f)
-    t_d = t_f
-    # decimate in stages: scipy advises q <= 13 per call
-    stages = [f for f in (10, 5, 4, 3, 2) if q % f == 0]
+    x_d = x_d - np.mean(x_d)
     rest = q
-    for f in stages:
+    for f in (10, 5, 4, 3, 2):        # scipy advises q <= 13 per call
         while rest % f == 0 and rest > 1:
-            x_f = signal.decimate(x_f, f, ftype="fir", zero_phase=True)
-            t_d = t_d[::f][: x_f.size]
+            x_d = signal.decimate(x_d, f, ftype="fir", zero_phase=True)
+            t_d = t_d[::f][: x_d.size]
             rest //= f
-    if rest != 1:                     # prime factor > 13: do it in one go
-        x_f = signal.decimate(x_f, rest, ftype="fir", zero_phase=True)
-        t_d = t_d[::rest][: x_f.size]
-    ts = np.asarray(t_slow, float)
-    ms = (ts >= t0) & (ts <= t1) & (ts >= t_d[0]) & (ts <= t_d[-1])
-    return ts[ms], CubicSpline(t_d, x_f)(ts[ms]), ms
+    if rest != 1:                     # a prime factor > 13: one go
+        x_d = signal.decimate(x_d, rest, ftype="fir", zero_phase=True)
+        t_d = t_d[::rest][: x_d.size]
+    return t_d, x_d
 
 
-def transfer(t_fast, x_fast, t_slow, x_slow, t0, t1, nperseg=2048):
-    """H(f) = S_xy / S_xx, coherence, on the slow grid.  Returns a dict."""
-    ts, xf, ms = to_slow_grid(t_fast, x_fast, t_slow, t0, t1)
-    ys = np.asarray(x_slow, float)[ms]
-    ys = ys - np.mean(ys)
+def estimate_delay(t_d, x_d, ts, ys, max_lag, band=BAND):
+    """Delay d of the slow channel behind the fast one, by cross-correlation.
+
+    Two digitisers do not share a time zero, and an offset of more than a few
+    ms is enough to flatten the coherence completely: the analysis segments
+    (10 ms) then see different stretches of signal.  Both signals are
+    band-passed first so the correlation is about the mode band, not drift.
+
+    slow(t) ~ fast(t - d).  Returns (d [s], peak normalised correlation).
+    """
+    dt = 1.0 / FS_SLOW
+    sos = signal.butter(4, [band[0], band[1]], btype="band", fs=FS_SLOW,
+                        output="sos")
+    xb = signal.sosfiltfilt(sos, x_d)
+    yb = signal.sosfiltfilt(sos, ys - np.mean(ys))
+    if xb.size < yb.size:
+        return 0.0, np.nan
+    c = signal.correlate(xb, yb, mode="valid", method="fft")      # [k]
+    e = np.concatenate([[0.0], np.cumsum(xb * xb)])
+    local = np.sqrt(np.maximum(e[yb.size:yb.size + c.size] - e[:c.size], 1e-300))
+    rho = c / (local * np.sqrt(np.sum(yb * yb)))
+    k = np.arange(c.size)
+    d = ts[0] - t_d[0] - k * dt
+    ok = np.abs(d) <= max_lag
+    if not ok.any():
+        return 0.0, np.nan
+    i = int(np.argmax(np.where(ok, np.abs(rho), -1.0)))
+    return float(d[i]), float(rho[i])
+
+
+def transfer(t_fast, x_fast, t_slow, x_slow, t0, t1, nperseg=2048,
+             max_lag=0.05):
+    """H(f) = S_xy / S_xx, coherence, delay and diagnostics.  Returns a dict."""
+    ts_all = np.asarray(t_slow, float)
+    ms = (ts_all >= t0) & (ts_all <= t1)
+    ts, ys = ts_all[ms], np.asarray(x_slow, float)[ms]
     if ts.size < 4 * nperseg:
-        raise ValueError(f"only {ts.size} common samples; need >= {4*nperseg}")
-    f, Pxx = signal.welch(xf, FS_SLOW, nperseg=nperseg)
-    _, Pyy = signal.welch(ys, FS_SLOW, nperseg=nperseg)
-    _, Pxy = signal.csd(xf, ys, FS_SLOW, nperseg=nperseg)
-    H = Pxy / Pxx
-    coh = np.abs(Pxy) ** 2 / (Pxx * Pyy)
-    return {"f": f, "H": H, "coh": coh, "n": ts.size}
+        raise ValueError(f"only {ts.size} slow samples in [{t0}, {t1}]; "
+                         f"need >= {4*nperseg}")
+    dts = np.diff(ts)
+    irregular = float(np.max(np.abs(dts - np.median(dts))) / np.median(dts))
+
+    t_d, x_d = decimate_fast(t_fast, x_fast, t0 - max_lag, t1 + max_lag)
+    delay, rho = estimate_delay(t_d, x_d, ts, ys, max_lag)
+
+    spl = CubicSpline(t_d, x_d)
+    keep = (ts - delay >= t_d[0]) & (ts - delay <= t_d[-1])
+    ts, ys = ts[keep], ys[keep]
+    if ts.size < 4 * nperseg:
+        raise ValueError("fast and slow records overlap too little after "
+                         f"a {1e3*delay:.2f} ms alignment")
+    xf = spl(ts - delay)
+    ys = ys - np.mean(ys)
+
+    f, Pxx = signal.welch(xf, FS_SLOW, nperseg=nperseg, detrend="linear")
+    _, Pyy = signal.welch(ys, FS_SLOW, nperseg=nperseg, detrend="linear")
+    _, Pxy = signal.csd(xf, ys, FS_SLOW, nperseg=nperseg, detrend="linear")
+    return {"f": f, "H": Pxy / Pxx, "coh": np.abs(Pxy) ** 2 / (Pxx * Pyy),
+            "n": ts.size, "delay": delay, "xcorr": rho,
+            "rms_fast": float(np.std(xf)), "rms_slow": float(np.std(ys)),
+            "irregular": irregular}
 
 
 def verdict(res, band=BAND, coh_ok=COH_OK):
@@ -93,8 +138,18 @@ def verdict(res, band=BAND, coh_ok=COH_OK):
         return out
     lf, lh = np.log10(f[sel]), np.log10(np.abs(H[sel]))
     slope = float(np.polyfit(lf, lh, 1)[0])
-    # phase of the complex mean, so +-180 wrapping cannot fool a plain average
-    phase = float(np.degrees(np.angle(np.mean(H[sel] / np.abs(H[sel])))))
+    # Phase = phi0 - 2 pi f dt: a constant phase (integral, derivative, sign)
+    # plus a residual delay left over from the coarse alignment.  Fitting both
+    # at once keeps a few microseconds of leftover delay from masquerading as a
+    # phase, and avoids unwrapping.  For each trial dt the best phi0 is the
+    # argument of z(dt) = sum_k u_k exp(+i 2 pi f_k dt), u = H/|H|.
+    u = H[sel] / np.abs(H[sel])
+    dts = np.arange(-200e-6, 200e-6, 0.5e-6)
+    z = (u[:, None] * np.exp(2j * np.pi * f[sel][:, None] * dts[None, :])).sum(axis=0)
+    j = int(np.argmax(np.abs(z)))
+    phase = float(np.degrees(np.angle(z[j])))
+    out["delay_resid"] = float(dts[j])
+    out["phase_fit"] = float(np.abs(z[j]) / u.size)    # 1 = phase fully explained
     gain = float(10 ** np.median(lh))
     out.update(slope=slope, phase_deg=phase, gain=gain)
     if abs(slope) < 0.25 and abs(phase) < 25:
@@ -128,6 +183,8 @@ def table(res, nb=14, lo=300.0, hi=60.0e3):
 
 def report(label, res):
     print(f"\n{label}   ({res['n']} common samples)")
+    print(f"  delay of slow behind fast: {1e3*res['delay']:+.3f} ms by correlation"
+          f"   (peak band-passed correlation {res['xcorr']:.3f})")
     print(f"  {'f [kHz]':>8} {'coh':>6} {'|H| slow/fast':>14} {'phase':>8}")
     for fc, c, g, ph in table(res):
         flag = "" if c >= COH_OK else "   (low coherence)"
@@ -136,10 +193,29 @@ def report(label, res):
     print(f"\n  verdict: {v['kind']}")
     if "note" in v:
         print(f"           {v['note']}")
+        c = res["coh"]
+        band = (res["f"] >= BAND[0]) & (res["f"] <= BAND[1])
+        i = int(np.argmax(np.where(band, c, -1)))
+        print(f"\n  diagnostics:")
+        print(f"    best coherence in band   {c[i]:.2f} at {res['f'][i]/1e3:.2f} kHz,"
+              f"  median {np.median(c[band]):.2f}  (pure noise ~ 0.05)")
+        print(f"    rms in window            fast {res['rms_fast']:.4g}"
+              f"   slow {res['rms_slow']:.4g}   [V]")
+        print(f"    slow time stamps         worst dt deviation "
+              f"{100*res['irregular']:.1f}% of the median")
+        print(f"    band-passed correlation  {res['xcorr']:.3f} at the best delay")
+        print("    -> correlation near 0 even after the delay search: the two\n"
+              "       channels see no common signal.  Check the coil pairing, a\n"
+              "       window with real MHD activity, and the time stamps.")
+        print("    -> correlation clearly above 0 but coherence still low: the\n"
+              "       delay is drifting (clock mismatch); try a shorter window.")
     else:
         print(f"           {BAND[0]/1e3:.0f}-{BAND[1]/1e3:.0f} kHz, {v['n_bins']}/"
               f"{v['n_band']} bins: log-log slope of |H| = {v['slope']:+.2f}, "
               f"phase = {v['phase_deg']:+.0f} deg, gain = {v['gain']:.4g}")
+        print(f"           residual delay {1e6*v['delay_resid']:+.1f} us -> total "
+              f"{1e3*(res['delay'] + v['delay_resid']):+.4f} ms;  phase fit quality "
+              f"{v['phase_fit']:.2f} (1 = clean constant phase + delay)")
     return v
 
 
@@ -149,6 +225,8 @@ def main():
     p.add_argument("--t0", type=float, default=0.2)
     p.add_argument("--t1", type=float, default=0.8)
     p.add_argument("--all-coils", action="store_true")
+    p.add_argument("--max-lag", type=float, default=0.05,
+                   help="largest slow-behind-fast delay searched [s]")
     p.add_argument("--plot", action="store_true", help="write compare_lf_hf_<shot>.png")
     a = p.parse_args()
 
@@ -169,7 +247,7 @@ def main():
             vs = client.get(line.name_slow, a.shot)
             vf = client.get(line.name_fast, a.shot)
             res = transfer(vf.time.data, vf.data, vs.time.data, vs.data,
-                           a.t0, a.t1)
+                           a.t0, a.t1, max_lag=a.max_lag)
         except Exception as e:
             print(f"\n{line.name_slow}: {type(e).__name__}: {e}")
             continue
