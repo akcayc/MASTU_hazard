@@ -146,27 +146,61 @@ def main():
             return f"{np.median(x):8.2f}  [{q1:6.2f},{q3:6.2f}]"
         print(f"  {g:5.2f} {fs(PF):>28} {fs(FF):>28}")
 
-    fin = [(g, r) for g, r in ratios if np.isfinite(r)]
+    # Three independent signatures, not one ratio.  A real mode shows all
+    # three; any one alone can be produced by an artefact.
+    g0, g1 = a.gates[0], a.gates[-1]
+    P0, F0, PF0, FF0, s0, t0_ = acc[g0]
+    P1, F1, PF1, FF1, s1, t1_ = acc[g1]
+    sp0, sp1, sf0, sf1 = stats(P0), stats(P1), stats(F0), stats(F1)
+
+    def iqr(x):
+        x = np.asarray(x, float); x = x[np.isfinite(x)] / 1e3
+        if x.size < 2:
+            return np.nan
+        q1, q3 = np.percentile(x, [25, 75])
+        return q3 - q1
+
+    drop = sp0["med"] / sp1["med"] if sp1["med"] else np.inf
+    kept0 = 100.0 * s0 / t0_ if t0_ else np.nan
+    kept1 = 100.0 * s1 / t1_ if t1_ else np.nan
+    p90_change = sf1["p90"] / sf0["p90"] if sf0["p90"] else np.nan
+    iqr0, iqr1 = iqr(FF0), iqr(FF1)
+    narrow = iqr0 / iqr1 if iqr1 else np.nan
+
+    c1 = (drop > 3.0) or (np.isfinite(kept1) and kept1 < 20.0)
+    c2 = np.isfinite(p90_change) and 0.5 < p90_change < 2.0
+    c3 = np.isfinite(narrow) and narrow > 2.0
+
+    print(f"\n  gate {g0:.2f} -> {g1:.2f}")
+    print(f"  [{'YES' if c1 else 'NO '}] vacuum collapses      "
+          f"pre med /{drop:6.1f},  pre kept {kept0:.0f}% -> {kept1:.0f}%")
+    print(f"      nothing coherent survives where there is no plasma")
+    print(f"  [{'YES' if c2 else 'NO '}] strong slices hold    "
+          f"flat p90 x{p90_change:5.2f}")
+    print(f"      gating leaves the big excursions alone, so their power is")
+    print(f"      coherent; a rise in flat med is then slices dropping out,")
+    print(f"      not the amplitude inflating")
+    print(f"  [{'YES' if c3 else 'NO '}] Fa concentrates       "
+          f"flat IQR {iqr0:.2f} -> {iqr1:.2f} kHz (x{narrow:.1f} narrower), "
+          f"median -> {np.nanmedian(np.asarray(FF1,float))/1e3:.2f} kHz")
+    print(f"      the surviving power sits at one frequency, not spread")
+
+    n = sum((c1, c2, c3))
     print()
-    if not fin:
-        print("  no verdict: the gate removed everything in one window")
+    if n == 3:
+        print("  VERDICT all three -- plasma signal.  The mode frequency is the")
+        print("          converged flat-top Fa above.")
+    elif n == 2:
+        print("  VERDICT two of three -- probably signal, but check which failed.")
+    elif n == 1:
+        print("  VERDICT one of three -- not convincing.  One signature alone is")
+        print("          reachable by an artefact.")
     else:
-        lo, hi = fin[0][1], fin[-1][1]
-        print(f"  ratio at gate {fin[0][0]:.2f}: {lo:.2f}   "
-              f"at gate {fin[-1][0]:.2f}: {hi:.2f}")
-        if hi > 3.0 * lo and hi > 3.0:
-            print("  VERDICT the gate separates plasma from vacuum -- the")
-            print("          surviving coherent power is plasma signal.")
-        elif hi < 1.5 * lo:
-            print("  VERDICT gating does NOT separate plasma from vacuum.")
-            print("          Coherent power of the same size is present with no")
-            print("          plasma, so it is instrumental, not MHD.  Check the")
-            print("          Fa table above: a fixed frequency in both windows")
-            print("          names the line.  The coherence gate is isolating")
-            print("          that line, and the ladder is detecting it.")
-        else:
-            print("  VERDICT partial separation -- some plasma signal, but the")
-            print("          vacuum window is not clean.  Look at the Fa table.")
+        print("  VERDICT none -- no evidence of a mode in this window.")
+    if c1 and np.isfinite(kept1) and 0 < kept1 < 20 and s1 <= 2:
+        print(f"  NOTE only {s1} pre-plasma slice(s) survive at gate {g1:.2f};")
+        print(f"       the Fa pre row there is one bin, not a distribution.")
+
     print("\n  'pre kept' is the fraction of no-plasma slices still carrying a")
     print("  finite amplitude.  A gate that works should drive this toward zero.")
     return 0
