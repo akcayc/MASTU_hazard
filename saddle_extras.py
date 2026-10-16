@@ -178,6 +178,23 @@ def amplitude_with_coherence(rm, sel: AmplitudeSelector, coh_min=0.0,
     power_sum = power_masked.sum(axis=1)
 
     Bp = np.sqrt(power_sum).filled(fill_value=np.nan)
+
+    # Fa -- the POWER-WEIGHTED MEAN FREQUENCY of the surviving bins,
+    #     Fa(t) = sum_f f P(f,t) / sum_f P(f,t),
+    # i.e. the centre of gravity of the admitted spectrum.  It does three jobs
+    # at once, which is worth keeping in mind because they stand or fall
+    # together:
+    #   * it is the reported mode frequency (per_n[n]["freq"]);
+    #   * it is the divisor in Ba below, so it sets the centroid amplitude;
+    #   * it says WHERE in frequency the surviving power sits, which is what
+    #     separates plasma from hardware -- a fixed, narrow Fa present with no
+    #     plasma names an instrumental line (see compare_pre_plasma.py).
+    # It is only a MODE frequency if the power is actually concentrated.  Over
+    # a broad spectrum it is the centroid of a mush and corresponds to nothing
+    # physical: ungated on 47000-47019 it sat near 9 kHz with IQR 7-13 kHz,
+    # which is just the band centre.  That is the same narrowband assumption
+    # that makes Ba = Bp/(2 pi Fa) valid, so when Fa stops meaning anything
+    # neither does the default amplitude.
     Fa = ((power_masked * Fsel).sum(axis=1) / power_sum).filled(fill_value=np.nan)
     Fa[Bp < sel.v_min] = np.nan
     Ba = Bp / Fa / 2 / np.pi
