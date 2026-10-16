@@ -200,6 +200,40 @@ def main():
     print(f"    {'PASS' if good else 'FAIL'}  n=0 suppresses the common mode "
           f"({res['without']/max(res['with   '],1e-12):.0f}x)")
 
+    # --- 6. Fa tracks a chirp ------------------------------------------------
+    # Fa is a weighted mean over FREQUENCY within one slice, never across time,
+    # so a mode whose frequency slides is followed faithfully.  What loses the
+    # chirp is POOLING Fa over slices, as compare_pre_plasma does -- hence
+    # plot_mode_track.py.
+    print("\n  Fa must follow a chirping mode, not average it away")
+    rng3 = np.random.default_rng(11)
+    tc = np.arange(0, 0.40, 1 / FS)
+    f_true = 12000.0 + (3000.0 - 12000.0) * np.clip(tc / 0.40, 0, 1)
+    ph = 2 * np.pi * np.cumsum(f_true) / FS
+    ch = rng3.normal(0, 1.0, (NC, tc.size))
+    for c in range(NC):
+        ch[c] += 18.0 * np.sin(ph - np.radians(PHI[c]) * N_MODE)
+    sd_ch = SaddleFull(1, np.array([f"c{i}" for i in range(NC)]), tc, ch, PHI,
+                       np.full(NC, "X"))
+    rm_ch = sd_ch.spectrum(512).n_detection(np.array([0, -2, -1, 1, 2]))
+    sel_ch = AmplitudeSelector(ntor=N_MODE, time=np.array([0.0, 0.40]),
+                               f_min=np.array([1e3] * 2),
+                               f_max=np.array([4e4] * 2), v_min=0.0)
+    t_ch, Fa_ch, _, _, _ = amplitude_with_coherence(rm_ch, sel_ch, 0.6, True)
+    good = np.isfinite(Fa_ch)
+    err = np.abs(Fa_ch[good] - np.interp(t_ch[good], tc, f_true))
+    rel = float(np.median(err) / 1e3)
+    spread = float(np.percentile(Fa_ch[good], 75)
+                   - np.percentile(Fa_ch[good], 25)) / 1e3
+    tracks = rel < 0.5 and good.mean() > 0.8
+    ok &= tracks
+    print(f"    injected 12.0 -> 3.0 kHz over 400 ms")
+    print(f"    median |Fa - f_true| = {rel:.3f} kHz on {100*good.mean():.0f}% "
+          f"of slices")
+    print(f"    pooled Fa IQR = {spread:.2f} kHz -- WIDE, yet the track is exact")
+    print(f"    {'PASS' if tracks else 'FAIL'}  Fa follows the chirp; only the "
+          f"pooled summary loses it")
+
     print("\n  NOTE  the opposite-handedness block is the important one: the")
     print("        coherence correctly collapses, yet the UNGATED amplitude")
     print("        still rises ~10-17x for every n at once.  That is the false")
