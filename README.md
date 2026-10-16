@@ -256,6 +256,62 @@ survived, so there is no coherent power to report. `schmitt_first_crossing`
 treats NaN as not-above-threshold, so a gated-out stretch cannot trigger and
 resets the debounce, which is the intended behaviour.
 
+## How our selector differs from Giovannozzi's
+
+`amplitude_with_coherence` is `RecognizedModes.amplitude` with six changes.
+Everything else — band selection, `zeros_spectrum`, the masked sum, `Bp`, `Fa`
+— is byte-identical, and `amplitude_with_coherence(absolute_n=False,
+coh_min=0)` is still bit-for-bit equal to his method on real data, which
+`check_equivalence.py` asserts.
+
+**1. A coherence gate inside the frequency sum.** His `amplitude()` applies
+none. `RecognizedModes.threshold()` exists but is never called, and the driver
+passes `v_min=0.0`, so the one remaining rejection (`Fa[Bp < v_min] = nan`) is
+inert — nothing is ever discarded. Ours zeroes bins below `coh_min` before
+summing, as DIII-D's `W[SC12 < coh_min] = 0` does.
+
+**2. `n = 0` is searched, as a sink.** `saddle_extras.py`, in `analyze_shot`:
+
+```python
+search = [0] + [s * m for m in mags for s in (-1, 1)]
+```
+
+The argmax must pick a winner from whatever list it is given, so without 0 an
+axisymmetric signal is not excluded, it is *mislabelled* — and on these 5 coils
+spanning 60 deg it scores 0.866 on n=1, clearing any gate. `search` is what
+reaches `n_detection`; the reported magnitudes never include 0.
+
+**3. Pooling on |n|.** His mask is `Ntor != sel.ntor`, signed, so +1 and -1 are
+distinct modes — correct given a both-signs search list, which his instructions
+specify. (The original script passed `[1,2,3,4]`, positive only, which is what
+hid the other sense.) Ours masks on `|Ntor| != |n|`, as DIII-D does with
+`nsigned=False`, because a 60 deg array cannot separate +1 from -1 — their
+projections are 74% parallel.
+
+**4. A per-bin 1/omega^2 estimator, as an option.** His `Ba = Bp/(2 pi Fa)`
+divides the band total by one power-weighted centroid frequency, exact only
+for a narrowband line. `--amp-form perbin` instead weights each bin by its own
+frequency. **`centroid` remains the default**; `perbin` is there for comparison.
+
+Worth knowing when you gate: the centroid form is unstable under it. Removing
+the high-frequency bins collapses `Fa`, so `Ba = Bp/(2 pi Fa)` *rises*.
+Measured on 47000-47019, gating 0 -> 0.8 cut `Bp` by 1.8x while `1/Fa` grew
+23x, inflating the pre-plasma amplitude 13-fold. Compare the two forms before
+trusting a gated amplitude.
+
+**5. ENBW normalisation** (in `perbin` only). `specgram(mode='complex')`
+returns `FFT(w x)/sum(w)`, so his `Ba` is `sqrt(ENBW/2) = 0.867` of the true
+RMS even for a clean line. `amplitude_diiid` applies `2/ENBW` and reproduces a
+known synthetic amplitude to 0.1%.
+
+**6. The coherence is returned.** His method returns `(time, Fa, Bp, Ba)` and
+discards the coherence `n_detection` already computed. Ours returns the
+power-weighted coherence per slice alongside, so it can be gated on and
+inspected.
+
+Separately, `FMIN_DEFAULT` moved from 100 Hz to 2 kHz — a default in
+`saddle_analysis.py`, not a change to the selector.
+
 ## n=0 absorbs the common mode
 
 A signal every coil sees identically — baseline wander, slow drift — has no
@@ -278,8 +334,8 @@ gate, which common mode fails at nhat ~ 0.
 
 Two companion changes:
 
-**The default estimator is now `--amp-form perbin`** (DIII-D's per-bin
-1/omega^2), not `centroid` (Giovannozzi's `Ba`). The centroid form is unstable
+**`--amp-form perbin`** (DIII-D's per-bin 1/omega^2) is available alongside
+the default `centroid` (Giovannozzi's `Ba`). The centroid form is unstable
 under gating: strip the high-frequency bins and `Fa` collapses, so
 `Ba = Bp/(2 pi Fa)` *rises*. Measured: gating 0 -> 0.8 cut `Bp` by 1.8x while
 `1/Fa` grew 23x, inflating the pre-plasma amplitude 13-fold. An amplitude that

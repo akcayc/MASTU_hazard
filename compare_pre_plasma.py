@@ -79,11 +79,11 @@ def main():
                    help="end of the no-plasma window [s]")
     p.add_argument("--t0", type=float, help="fixed flat-top start, else from Ip")
     p.add_argument("--t1", type=float, help="fixed flat-top end")
-    p.add_argument("--amp-form", choices=["perbin", "centroid"],
-                   default="perbin")
+    p.add_argument("--amp-form", choices=["centroid", "perbin"],
+                   default="centroid")
     a = p.parse_args()
     shots = a.shots or list(range(a.shot_min, a.shot_max))
-    key = "amp_centroid" if a.amp_form == "centroid" else "amp_perbin"
+    key = "amp_perbin" if a.amp_form == "perbin" else "amp_centroid"
 
     client = pyuda.Client()
     # rows[gate] = (pre amplitudes, flat amplitudes, pre freqs, flat freqs,

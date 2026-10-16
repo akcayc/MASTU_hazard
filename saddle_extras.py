@@ -331,14 +331,14 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
         per_n[n] = {
             "amp_perbin": Bd,     # DIII-D form: per-bin 1/omega^2
             "amp_centroid": Ba,   # Giovannozzi: band total / centroid
-            "amp": Bd,            # the default estimator
+            "amp": Ba,            # the default estimator (centroid)
             "noise_floor_perbin": noise_floor(t, Bd, t_pre),
             "noise_floor_centroid": noise_floor(t, Ba, t_pre),
             "damp_dt": Bp,
             "freq": freq,
             "time": t,
             "coherence": coh,
-            "noise_floor": noise_floor(t, Bd, t_pre),
+            "noise_floor": noise_floor(t, Ba, t_pre),
             "LMlabels": (freq < LM_FREQ_HZ).astype(int),
         }
 
