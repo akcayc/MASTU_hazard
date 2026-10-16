@@ -300,12 +300,24 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
     if sd.time.size < 2:
         raise RuntimeError(f"no OMAHA data for shot {shot}")
 
+    # n=0 is ALWAYS searched, and never reported.  It is a sink for the
+    # common mode: a signal every coil sees identically (baseline wander, slow
+    # drift) has no toroidal structure, but on a clustered array it does not
+    # cancel against exp(-i n phi).  On the 5 OMAHA coils, spanning 60 deg,
+    # a pure common-mode signal scores
+    #     |sum exp(-i phi_c)|^2 / N^2 = 0.866
+    # on n=1 -- above any gate worth setting.  Measured consequence before
+    # this fix: at coh_min=0.8 the surviving pre-plasma bins were bin 1 alone
+    # (Fa = 390 Hz = the FFT bin width), i.e. drift masquerading as n=1.
+    # With 0 in the list the argmax sends those bins to n=0 (coherence 1.000
+    # beats 0.866) and the |n|>=1 masks exclude them.  DIII-D is protected
+    # instead by its integerness gate, which common mode fails at nhat ~ 0.
     if absolute_n:
         mags = sorted({abs(int(n)) for n in ntor if int(n) != 0})
-        search = [s * m for m in mags for s in (-1, 1)]
+        search = [0] + [s * m for m in mags for s in (-1, 1)]
         ntor = mags
     else:
-        search = [int(n) for n in ntor]
+        search = sorted({0} | {int(n) for n in ntor})
 
     sp = sd.spectrum(NFFT)
     rm = sp.n_detection(np.asarray(search))
@@ -317,14 +329,16 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
                                                         absolute_n=absolute_n)
         _, Bd = amplitude_diiid(rm, sel, coh_min, absolute_n=absolute_n)
         per_n[n] = {
-            "amp": Ba,
-            "amp_diiid": Bd,
-            "noise_floor_diiid": noise_floor(t, Bd, t_pre),
+            "amp_perbin": Bd,     # DIII-D form: per-bin 1/omega^2
+            "amp_centroid": Ba,   # Giovannozzi: band total / centroid
+            "amp": Bd,            # the default estimator
+            "noise_floor_perbin": noise_floor(t, Bd, t_pre),
+            "noise_floor_centroid": noise_floor(t, Ba, t_pre),
             "damp_dt": Bp,
             "freq": freq,
             "time": t,
             "coherence": coh,
-            "noise_floor": noise_floor(t, Ba, t_pre),
+            "noise_floor": noise_floor(t, Bd, t_pre),
             "LMlabels": (freq < LM_FREQ_HZ).astype(int),
         }
 

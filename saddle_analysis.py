@@ -49,7 +49,12 @@ NFFT_DEFAULT = 512
 # negative)".
 NTOR_DEFAULT = [-4, -3, -2, -1, 1, 2, 3, 4]
 TIME_INTERVAL_DEFAULT = np.array([0.0, 2.0])
-FMIN_DEFAULT = 1.0e2
+# Band floor.  100 Hz put the lowest FFT bin (390.6 Hz at 200 kHz / NFFT=512)
+# inside the band, and that bin carries the common-mode drift -- it dominated
+# the gated pre-plasma amplitude on shots 47000-47019.  Giovannozzi's own
+# example used 1 kHz; 2 kHz clears the first few bins with margin.  Raise or
+# lower it with --f-min, but check where Fa lands before trusting the result.
+FMIN_DEFAULT = 2.0e3
 FMAX_DEFAULT = 50.0e3
 VMIN_DEFAULT = 0.0
 LM_FREQ_HZ = 2000.0      # PPCF 2025 convention: below this, call it locked

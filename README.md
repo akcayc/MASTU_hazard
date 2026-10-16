@@ -256,7 +256,46 @@ survived, so there is no coherent power to report. `schmitt_first_crossing`
 treats NaN as not-above-threshold, so a gated-out stretch cannot trigger and
 resets the debounce, which is the intended behaviour.
 
-## Where the gate goes: 0.60
+## n=0 absorbs the common mode
+
+A signal every coil sees identically — baseline wander, slow drift — has no
+toroidal structure, but on a clustered array it does not cancel against
+`exp(-i n phi)`. On the 5 OMAHA coils spanning 60 deg a pure common-mode
+signal scores
+
+    |sum exp(-i phi_c)|^2 / N_c^2  =  0.866   on n=1
+
+which clears any gate worth setting. Measured consequence, shots 47000-47019:
+at `coh_min = 0.8` the surviving pre-plasma bins were bin 1 alone — Fa = 390 Hz,
+exactly the FFT bin width — i.e. drift read as a near-perfect n=1 mode in a
+vessel with no plasma.
+
+`n = 0` is now always searched and never reported. The argmax sends those bins
+to n=0 (coherence 1.000 beats 0.866) and the |n| >= 1 masks exclude them. On
+synthetic pure common mode this cuts the spurious n=1 amplitude by **230x**
+(`tests/test_coherence.py`). DIII-D is protected instead by its integerness
+gate, which common mode fails at nhat ~ 0.
+
+Two companion changes:
+
+**The default estimator is now `--amp-form perbin`** (DIII-D's per-bin
+1/omega^2), not `centroid` (Giovannozzi's `Ba`). The centroid form is unstable
+under gating: strip the high-frequency bins and `Fa` collapses, so
+`Ba = Bp/(2 pi Fa)` *rises*. Measured: gating 0 -> 0.8 cut `Bp` by 1.8x while
+`1/Fa` grew 23x, inflating the pre-plasma amplitude 13-fold. An amplitude that
+grows when you remove bins from the sum is not an amplitude.
+
+**`FMIN_DEFAULT` is 2 kHz**, up from 100 Hz, which had put the lowest FFT bin
+inside the band.
+
+### What this invalidates
+
+The 0.60 gate below, the `coherence_survey` power-kept plateau, and every
+ladder result predate these fixes. The "coherent minority holding half the
+power" may have been the common mode. Rerun `coherence_survey` first — it is
+cheap, and it says whether a real plateau survives.
+
+## Where the gate goes: 0.60 (SUPERSEDED, see above)
 
 Measured on 93 shots of 47000-47099 with `coherence_survey.py` — 10.1M in-band
 bins, 5 OMAHA coils at phi = [36.8, 26.5, 4.0, -5.0, -23.0]:

@@ -169,6 +169,37 @@ def main():
     print(f"    info  Gio Ba / true B_rms = {ratio:.3f} for this line "
           f"(sqrt(ENBW/2) = {np.sqrt(hann_enbw(512)/2):.3f})")
 
+    # --- 5. n=0 absorbs the common mode --------------------------------------
+    # A signal every coil sees identically has no toroidal structure, but on a
+    # clustered array it does not cancel against exp(-i n phi): the 5 OMAHA
+    # coils give it coherence 0.866 on n=1.  With 0 in the search list the
+    # argmax sends those bins to n=0 instead.
+    print("\n  n=0 sink: pure common mode must not read as n=1")
+    rng2 = np.random.default_rng(7)
+    OM = np.array([36.8, 26.5, 4.0, -5.0, -23.0])
+    tt = np.arange(0, T, 1 / FS)
+    cm = rng2.normal(0, 1.0, (OM.size, tt.size))
+    for c in range(OM.size):
+        cm[c] += 30.0 * np.sin(2 * np.pi * 400.0 * tt)       # identical in every coil
+    sd_cm = SaddleFull(1, np.array([f"c{i}" for i in range(OM.size)]), tt, cm,
+                       OM, np.full(OM.size, "X"))
+    sel_cm = AmplitudeSelector(ntor=1, time=np.array([0.0, T]),
+                               f_min=np.array([1e2] * 2),
+                               f_max=np.array([5e4] * 2), v_min=0.0)
+    res = {}
+    for tag, NT in (("without", np.array([-4, -3, -2, -1, 1, 2, 3, 4])),
+                    ("with   ", np.array([0, -4, -3, -2, -1, 1, 2, 3, 4]))):
+        rm_cm = sd_cm.spectrum(512).n_detection(NT)
+        _, _, Bp_cm, _, _ = amplitude_with_coherence(rm_cm, sel_cm, 0.8, True)
+        f = np.isfinite(Bp_cm)
+        res[tag] = np.nanmedian(Bp_cm[f]) if f.any() else 0.0
+        print(f"    {tag} n=0: n=1 amplitude at gate 0.8 = {res[tag]:.4g}"
+              f"   ({100*f.mean():.0f}% of slices survive)")
+    good = res["with   "] < res["without"] / 10.0
+    ok &= good
+    print(f"    {'PASS' if good else 'FAIL'}  n=0 suppresses the common mode "
+          f"({res['without']/max(res['with   '],1e-12):.0f}x)")
+
     print("\n  NOTE  the opposite-handedness block is the important one: the")
     print("        coherence correctly collapses, yet the UNGATED amplitude")
     print("        still rises ~10-17x for every n at once.  That is the false")

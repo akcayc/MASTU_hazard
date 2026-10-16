@@ -21,7 +21,7 @@ windows and repeating shot to shot names an instrumental line.  Broad,
 shot-varying and drifting is MHD.
 
     python compare_pre_plasma.py --shot-min 47000 --shot-max 47020
-    python compare_pre_plasma.py --shots 47000 47001 --gates 0 0.4 0.8 --amp-form diiid
+    python compare_pre_plasma.py --shots 47000 47001 --gates 0 0.4 0.8 --amp-form centroid
 """
 
 import argparse
@@ -79,10 +79,11 @@ def main():
                    help="end of the no-plasma window [s]")
     p.add_argument("--t0", type=float, help="fixed flat-top start, else from Ip")
     p.add_argument("--t1", type=float, help="fixed flat-top end")
-    p.add_argument("--amp-form", choices=["gio", "diiid"], default="gio")
+    p.add_argument("--amp-form", choices=["perbin", "centroid"],
+                   default="perbin")
     a = p.parse_args()
     shots = a.shots or list(range(a.shot_min, a.shot_max))
-    key = "amp" if a.amp_form == "gio" else "amp_diiid"
+    key = "amp_centroid" if a.amp_form == "centroid" else "amp_perbin"
 
     client = pyuda.Client()
     # rows[gate] = (pre amplitudes, flat amplitudes, pre freqs, flat freqs,

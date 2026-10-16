@@ -75,7 +75,7 @@ except ImportError:
 # which is all a ladder needs -- but should not yet be compared against
 # published DIII-D numbers, because the OMAHA channel units are unconfirmed.
 # (specgram's own scaling is known: complex mode returns FFT/sum(w), so Gio's
-# Ba is sqrt(ENBW/2) = 0.867 of the true RMS on a line; --amp-form diiid
+# Ba is sqrt(ENBW/2) = 0.867 of the true RMS on a line; --amp-form perbin
 # removes it.)  Settling the units relabels every column by one constant; no
 # re-detection.
 #
@@ -121,13 +121,17 @@ def schmitt_first_crossing(time, signal, level, debounce=0.008):
 def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
                     ft_cfg=None, coherence_min=0.0, want_profiles=False,
                     normalize_floor=False, absolute_n=True,
-                    amp_form="gio"):
+                    amp_form="perbin"):
     """Fetch everything one shot contributes, on that shot's flat-top window.
 
     absolute_n: traces are keyed by |n| and pool both senses of rotation, as
     DIII-D does.  False keeps signed n.
-    amp_form: "gio" = Giovannozzi's Ba (band total / centroid frequency);
-    "diiid" = the DIII-D per-bin 1/omega^2 form, see saddle_extras.amplitude_diiid.
+    amp_form: "perbin" (default) = DIII-D's per-bin 1/omega^2 estimator;
+        "centroid" = Giovannozzi's Ba, the band total over one centroid
+        frequency.  perbin is the default because the centroid form is
+        unstable under gating: strip the high-frequency bins and Fa collapses,
+        so Ba = Bp/(2 pi Fa) RISES.  Measured: gating 0 -> 0.8 cut Bp by 1.8x
+        while 1/Fa grew 23x, inflating the pre-plasma amplitude 13-fold.
 
     Returns a dict; `ok` False means the shot is to be dropped, with `reason`
     saying why.  Nothing here thresholds or labels -- that is detect_ladder's
@@ -194,9 +198,10 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     traces = {}
     for n in keys:
         m = modes[n]
-        key = "amp_diiid" if amp_form == "diiid" else "amp"
+        key = "amp_centroid" if amp_form == "centroid" else "amp_perbin"
         t, amp, coh = m["time"], np.asarray(m[key], float), np.asarray(m["coherence"], float)
-        floor = m["noise_floor_diiid" if amp_form == "diiid" else "noise_floor"]
+        floor = m["noise_floor_centroid" if amp_form == "centroid"
+                  else "noise_floor_perbin"]
         if not np.isfinite(floor) or floor <= 0:
             floor = noise_floor(t, amp, t_pre=min(0.020, max(t_a * 0.5, 1e-3)))
         if not np.isfinite(floor) or floor <= 0:
@@ -264,7 +269,7 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008):
 def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       t_start=0.2, n_detect=1, debounce=0.008,
                       coherence_min=0.0, ft_cfg=None, normalize_floor=False,
-                      absolute_n=True, amp_form="gio"):
+                      absolute_n=True, amp_form="perbin"):
     """Run the detector over `shots` and return the ladder table."""
     ladder = DEFAULT_LADDER if ladder is None else np.asarray(ladder)
 
@@ -311,7 +316,7 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
 def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                NFFT=512, t_start=0.2, out_csv=None, coherence_min=0.0,
                debounce=0.008, n_detect=1, normalize_floor=False,
-               ladder_spec=None, absolute_n=True, amp_form="gio"):
+               ladder_spec=None, absolute_n=True, amp_form="perbin"):
     client = pyuda.Client()
     outputs = {}
 
@@ -349,7 +354,8 @@ def main():
     parser.add_argument("--n-detect", type=int, default=1,
                         help="toroidal mode number the ladder triggers on "
                              "(|n| unless --signed-n)")
-    parser.add_argument("--amp-form", choices=["gio", "diiid"], default="gio",
+    parser.add_argument("--amp-form", choices=["perbin", "centroid"],
+                        default="perbin",
                         help="amplitude estimator: Giovannozzi's band-total / "
                              "centroid, or the DIII-D per-bin 1/omega^2 form")
     parser.add_argument("--signed-n", action="store_true",
