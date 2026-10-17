@@ -30,7 +30,7 @@ recomputation over the database.
 | `probe_omaha.py` | Prints OMAHA channel units/description and any calibration column in `omaha_coils` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
 | `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
-| `plot_mode_track.py` | One shot: gated spectrogram with the Fa track, amplitude, coherence |
+| `plot_mode_track.py` | One shot: gated spectrogram per \|n\| overlaid, with Fa tracks |
 | `make_annotation.py` | Ladder CSV + a threshold -> the 7-column survival table |
 | `extract_features.py` | EPM/EPQ descriptor extraction; `--probe` checks node availability |
 | `extract_parallel.py` | Threaded, resumable driver for the above |
@@ -427,13 +427,20 @@ So if a shot passes "vacuum collapses" and "strong slices hold" but fails
 "Fa concentrates", suspect a chirp before suspecting noise, and look at:
 
 ```bash
-python plot_mode_track.py --shot 49149 --coherence-min 0.6 --t0 0.6 --t1 0.8
+python plot_mode_track.py --shot 49149 --n-list 1 2 3 --coherence-min 0.6
 ```
 
-Panel 1 is the gated spectrogram — every bin failing the |n| mask or the
-coherence gate is blank — with Fa drawn on top. A real mode is a continuous
-track; noise is scatter. Panels 2 and 3 are the amplitude the ladder triggers
-on and the per-slice coherence, on the same time axis.
+Panel 1 overlays one gated spectrogram per |n|, each in its own hue: colour
+says which |n| claimed the bin, intensity is power, and bins failing the mask
+or the gate are blank. Fa is drawn on top. A real mode is a continuous track;
+noise is scatter. Panels 2 and 3 are the amplitude the ladder triggers on and
+the per-slice coherence, same time axis, one line per |n|.
+
+Fa is a centroid, so on noise it wanders across the whole band and says
+nothing. The track is therefore drawn only where the amplitude exceeds
+`--track-snr` (default 3) times that |n|'s own pre-plasma floor — without
+that, the scatter from the absent modes swamps the tracks of the present
+ones. Up to four |n| values; a fifth would need a generated hue.
 
 ## Not yet written
 
