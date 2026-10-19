@@ -32,6 +32,8 @@ recomputation over the database.
 | `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
 | `plot_mode_track.py` | One shot: gated spectrogram per \|n\| overlaid, with Fa tracks |
 | `make_annotation.py` | Ladder CSV + a threshold -> the 7-column survival table |
+| `merge_pair.py` | EPQ onto EPM's time base, then flatten to the survival table |
+| `compare_trees.py` | Does EPQ use more constraints than EPM? |
 | `extract_features.py` | EPM/EPQ descriptor extraction; `--probe` checks node availability |
 | `extract_parallel.py` | Threaded, resumable driver for the above |
 | `checkpoint.py` | Chunked append-only store; atomic writes, resume on restart |
@@ -501,11 +503,43 @@ nothing. The track is therefore drawn only where the amplitude exceeds
 that, the scatter from the absent modes swamps the tracks of the present
 ones. Up to four |n| values; a fifth would need a generated hue.
 
+## The merge: full EPM and the matched pair, from one file
+
+```bash
+python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \
+    --out merged.pickle
+```
+
+EPM is the primary, as EFIT01 is for DIII-D. **Every EPM row is kept**; EPQ
+contributes NaN wherever it has no slice in the matching window, and a shot
+absent from EPQ entirely keeps its EPM rows with an all-NaN secondary. So the
+choice between
+
+    full EPM        X1, every row
+    matched pair    X1 and X2 where `matched`
+
+is made downstream, not at merge time — both analyses run off one harvest.
+
+Tolerances come from the measured 5.03 ms cadence, not from DIII-D's 20 ms
+grid: merge delta `dt/4` = 1.26 ms, `event_delta` `2*dt` = 10.05 ms. Because
+the window is ±dt/4, at most one secondary slice can fall inside it, so
+"earliest candidate" and "nearest candidate" coincide — the ambiguity in the
+DIII-D original does not arise here, and `tests/test_merge.py` asserts it.
+
+The label goes on the last row of an event shot, which *is* the last pre-event
+slice because extraction chopped at `tevent`. It is applied only if that row
+sits within `event_delta` of the event; otherwise the event is dropped and
+counted, since a growing island degrades the fit and an equilibrium from long
+before the onset would be a false label.
+
+`error` and `chisq` are dropped from the model features by default — they are
+reconstruction quality, for screening only.
+
 ## Not yet written
 
 Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectral
-detector cannot see a DC island); the EPM/EPQ merge on matched time bases; the
-survival table; the hazard model itself.
+detector cannot see a DC island, and the 1 kHz band floor excludes one by
+construction); screening limits re-derived for an ST; the hazard model itself.
 
 EPQ and EPM appear to be the MAST-U counterparts of EFIT02 and EFIT01, so the
 matched-pair machinery should port with little change.
