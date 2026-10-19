@@ -11,6 +11,10 @@ DIII-D feature extractor expects.
     tevent = min(teof, trm, tlm)          over the finite entries
     ievent = 0 censored | 1 rotating | 2 locked
 
+Two further columns follow when the ladder carries them: fa_event, the mode
+frequency at the crossing, and coh_event, the coherence there.  They cost
+nothing to carry and they are what tells a rotating event from a locked one.
+
 With no locked-mode detector, tlm is always NaN and ievent is 0 or 1.  The
 schema keeps the column so the LM branch can be added without a format change.
 
@@ -36,7 +40,7 @@ def pick_column(df, threshold):
     return cols[i], float(lv[i])
 
 
-def build(df, col, eq_start):
+def build(df, col, eq_start, fa_col=None, co_col=None):
     rows, skipped = [], {}
     n_before_eq = 0
     for _, r in df.iterrows():
@@ -61,8 +65,13 @@ def build(df, col, eq_start):
         cand = [(t, i) for t, i in cand if np.isfinite(t)]
         tevent, ievent = min(cand, key=lambda x: x[0])
 
-        rows.append(dict(shot=shot, tsof=tsof, teof=teof, trm=trm, tlm=tlm,
-                         tevent=tevent, ievent=ievent))
+        row = dict(shot=shot, tsof=tsof, teof=teof, trm=trm, tlm=tlm,
+                   tevent=tevent, ievent=ievent)
+        # only meaningful for a rotating event: for a censored shot tevent is
+        # just the end of the window, where no crossing happened
+        row["fa_event"] = float(r[fa_col]) if (fa_col and ievent == 1) else np.nan
+        row["coh_event"] = float(r[co_col]) if (co_col and ievent == 1) else np.nan
+        rows.append(row)
     return pd.DataFrame(rows), skipped, n_before_eq
 
 
@@ -81,13 +90,21 @@ def main():
     col, lv = pick_column(df, a.threshold)
     if abs(lv - a.threshold) > 1e-9:
         print(f"threshold {a.threshold:g} G -> nearest column {col} ({lv:.5f} G)")
-    ann, skipped, n_before_eq = build(df, col, a.eq_start)
+    fa_col = col.replace("rm", "fa", 1) if col.replace("rm", "fa", 1) in df.columns else None
+    co_col = col.replace("rm", "co", 1) if col.replace("rm", "co", 1) in df.columns else None
+    if fa_col is None:
+        print("  note: ladder has no fa*/co* columns (pre-dates them); "
+              "fa_event and coh_event will be empty")
+    ann, skipped, n_before_eq = build(df, col, a.eq_start, fa_col, co_col)
 
     if ann.empty:
         raise SystemExit("no usable shots")
     ann = ann.sort_values("shot")
+    # the first seven columns are the format extract_features reads; the two
+    # that follow are extra and are ignored by anything that does not want them
     ann.to_csv(a.out, index=False,
-               columns=["shot", "tsof", "teof", "trm", "tlm", "tevent", "ievent"])
+               columns=["shot", "tsof", "teof", "trm", "tlm", "tevent", "ievent",
+                        "fa_event", "coh_event"])
 
     E = int((ann["ievent"] > 0).sum())
     N = len(ann)
@@ -100,6 +117,12 @@ def main():
         te = ann.loc[ann["ievent"] > 0, "tevent"]
         print(f"  event times    {te.min():.4f} .. {te.max():.4f} s "
               f"(median {te.median():.4f})")
+    fa = ann.loc[ann["ievent"] > 0, "fa_event"]
+    fa = fa[np.isfinite(fa)]
+    if fa.size:
+        q1, q3 = np.percentile(fa / 1e3, [25, 75])
+        print(f"  Fa at onset   {np.median(fa)/1e3:.2f} kHz  "
+              f"IQR [{q1:.2f}, {q3:.2f}]  over {fa.size} events")
     if n_before_eq:
         print(f"  WARNING {n_before_eq} events before the equilibrium record "
               f"opens at {a.eq_start:.3f} s -- no features to attach")

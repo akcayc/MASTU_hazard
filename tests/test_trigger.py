@@ -23,6 +23,51 @@ def test_n_detect_guard():
     return 0 if ok else 1
 
 
+def test_freq_continuity():
+    """The optional Fa-continuity mask: off by default, keeps chirps, cuts noise."""
+    import numpy as np
+    from run_master import schmitt_first_crossing as sc
+    t = np.arange(0, 1.0, 0.00128)              # the real 1.28 ms stride
+    amp = np.zeros_like(t); amp[300:] = 10.0    # amplitude crosses at t=0.384
+    ok = True
+
+    def chk(label, cond):
+        nonlocal ok
+        ok &= bool(cond)
+        print(f"  {'PASS' if cond else 'FAIL'}  {label}")
+
+    base = sc(t, amp, 5.0, 0.008)
+    chk(f"off by default: fires at {base:.4f} s",
+        np.isfinite(base) and abs(base - t[300]) < 2e-3)
+
+    # a mode sliding 4 -> 1 kHz over 20 ms: 192 Hz per slice
+    lock = np.full_like(t, 4000.0)
+    k = np.flatnonzero((t >= t[300]) & (t <= t[300] + 0.020))
+    lock[k] = np.linspace(4000.0, 1000.0, k.size)
+    lock[k[-1]:] = 1000.0
+    got = sc(t, amp, 5.0, 0.008, freq=lock, freq_step_max=1000.0)
+    chk(f"locking transition survives a 1 kHz tolerance ({got:.4f} s)",
+        np.isfinite(got) and abs(got - base) < 2e-3)
+
+    # noise Fa: hops across the band every slice
+    rng = np.random.default_rng(0)
+    noisy = rng.uniform(1e3, 5e4, t.size)
+    chk("scattering Fa is rejected",
+        not np.isfinite(sc(t, amp, 5.0, 0.008, freq=noisy, freq_step_max=1000.0)))
+    chk("...but the same trace fires with the mask off",
+        np.isfinite(sc(t, amp, 5.0, 0.008)))
+
+    # monotonicity in level must survive the extra mask
+    steady = np.full_like(t, 4000.0)
+    ramp = np.zeros_like(t); ramp[300:] = np.linspace(4.0, 40.0, t.size - 300)
+    times = [sc(t, ramp, L, 0.008, freq=steady, freq_step_max=1000.0)
+             for L in (5.0, 10.0, 20.0, 30.0)]
+    fin = [x for x in times if np.isfinite(x)]
+    chk(f"ladder stays non-decreasing in level {[round(x,3) for x in fin]}",
+        all(b >= a - 1e-9 for a, b in zip(fin, fin[1:])))
+    return 0 if ok else 1
+
+
 def main():
     t = np.arange(0, 1.0, 0.001)
     ok = True
@@ -59,6 +104,7 @@ def main():
     check("5 ms run vs 8 ms debounce", brief, 5.0, np.nan)
 
     ok &= (test_n_detect_guard() == 0)
+    ok &= (test_freq_continuity() == 0)
     return 0 if ok else 1
 
 

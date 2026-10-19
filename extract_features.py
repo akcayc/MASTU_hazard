@@ -356,12 +356,16 @@ def read_annotation(path):
     """shot, tsof, teof, trm, tlm, tevent, ievent -- window is [tsof, tevent]."""
     D = np.genfromtxt(path, delimiter=",", skip_header=1)
     D = np.atleast_2d(D)
-    assert D.shape[1] == 7, f"expected 7 columns, got {D.shape[1]}"
+    # The first seven are the format; make_annotation appends fa_event and
+    # coh_event after them, which are read below but not required.
+    assert D.shape[1] >= 7, f"expected at least 7 columns, got {D.shape[1]}"
     out = {}
     for row in D:
         s = int(row[0])
         out[s] = {"shot": s, "ta": float(row[1]), "tb": float(row[5]),
-                  "event": int(row[6])}
+                  "event": int(row[6]),
+                  "fa_event": float(row[7]) if row.size > 7 else np.nan,
+                  "coh_event": float(row[8]) if row.size > 8 else np.nan}
         assert out[s]["ta"] < out[s]["tb"], f"shot {s}: ta >= tb"
         assert out[s]["event"] in (0, 1, 2)
     return out

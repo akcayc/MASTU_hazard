@@ -414,6 +414,65 @@ latency, not computation, so threads help nearly linearly; `extract_parallel`
 gives each worker its own pyuda client and checkpoints through `ChunkStore`,
 so a run that dies resumes where it stopped.
 
+## Fa at the crossing
+
+The ladder now carries three columns per level, not one:
+
+    rm0.01365   first crossing time [s]
+    fa0.01365   Fa on that slice -- the mode frequency at onset [Hz]
+    co0.01365   coherence on that slice
+
+Both extras are already computed at the crossing slice, so they cost nothing.
+`make_annotation` carries them through as `fa_event` and `coh_event`, appended
+after the seven-column format, and prints the onset-frequency distribution:
+
+    Fa at onset   4.25 kHz  IQR [4.13, 4.45]  over 12 events
+
+They are set only for `ievent == 1`: for a censored shot `tevent` is just the
+end of the window, where no crossing happened.
+
+What they buy: the rotating-versus-locked distinction, an input to a
+frequency-drop detector, and a screening column for the survival table.
+Everything that reads a ladder filters on `rm*`, so the new columns disturb
+nothing, and a ladder written before them still works — `make_annotation` says
+so and leaves the two fields empty.
+
+## Optional: Fa continuity in the trigger
+
+`--freq-step-max <Hz>` rejects a slice whose Fa jumped more than that from the
+previous one, so a crossing needs the amplitude above the level AND the
+frequency behaving. **Off by default.**
+
+Continuity, not stability. A mode that slides is still continuous slice to
+slice; noise Fa hops across the band. Per-slice steps at the 1.28 ms stride:
+
+| | per-slice dFa |
+|---|---|
+| slow chirp, 4->3 kHz over 200 ms | 6 Hz |
+| locking transition, 4->1 kHz over 20 ms | 192 Hz |
+| fast lock, 4->1 kHz over 5 ms | 768 Hz |
+| **noise** | **~16 kHz** |
+
+So 1000-2000 Hz passes every physical case and rejects noise by 10-20x. A
+*stability* test over the debounce window would instead reject the locking
+transition — the event we most want to keep.
+
+The mask does not depend on the level, so the ladder rows stay non-decreasing
+left to right and that consistency check still works
+(`tests/test_trigger.py`).
+
+Before adopting it, run your known-TM shots with and without and compare event
+counts. The events it removes should be the ones `plot_mode_track` shows as
+scatter rather than a track:
+
+```bash
+python run_master.py --shots <shots> --build-detector --coherence-min 0.6 \
+    --out-csv a.csv
+python run_master.py --shots <shots> --build-detector --coherence-min 0.6 \
+    --freq-step-max 1500 --out-csv b.csv
+python ladder_base_rate.py a.csv b.csv --labels off on
+```
+
 ## Chirping modes and the pooled Fa
 
 `compare_pre_plasma`'s third criterion, "Fa concentrates", fails on a real

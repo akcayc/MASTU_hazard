@@ -89,16 +89,45 @@ LADDER_NUM = 61
 DEFAULT_LADDER = np.logspace(np.log10(LADDER_MIN), np.log10(LADDER_MAX), LADDER_NUM)
 
 
-def schmitt_first_crossing(time, signal, level, debounce=0.008):
+def schmitt_first_crossing(time, signal, level, debounce=0.008,
+                           freq=None, freq_step_max=None):
     """First upward crossing of `level`, confirmed by `debounce` seconds.
 
     Reproduces the DIII-D trigger: no hysteresis (both Schmitt levels equal),
     and the reported time is back-dated to the crossing, not the confirmation.
     Returns NaN if never crossed.
+
+    OPTIONAL, OFF BY DEFAULT.  Give `freq` (Fa per slice) and `freq_step_max`
+    and a slice counts only if the amplitude is above the level AND Fa has not
+    jumped more than that many Hz from the previous slice.
+
+    CONTINUITY, not stability.  A mode that slides is still continuous slice to
+    slice; noise Fa hops across the whole band.  Per-slice steps at the 1.28 ms
+    stride:
+        slow chirp 4->3 kHz / 200 ms      6 Hz
+        locking    4->1 kHz /  20 ms    192 Hz
+        fast lock  4->1 kHz /   5 ms    768 Hz
+        noise                          ~16 kHz
+    so 1-2 kHz passes every physical case and rejects noise by 10-20x.  A
+    stability test over the debounce window instead would reject the locking
+    transition -- the event we most want to keep.
+
+    The mask does not depend on `level`, so `above` still shrinks monotonically
+    with it and the ladder rows stay non-decreasing left to right.
     """
     time = np.asarray(time, float)
     signal = np.asarray(signal, float)
     above = np.isfinite(signal) & (signal >= level)
+
+    if freq is not None and freq_step_max is not None:
+        f = np.asarray(freq, float)
+        step = np.full(f.shape, np.inf)
+        if f.size:
+            step[0] = 0.0          # nothing to compare the first slice against
+        if f.size > 1:
+            step[1:] = np.abs(np.diff(f))
+        above = above & np.isfinite(f) & (step <= freq_step_max)
+
     if not above.any():
         return np.nan
 
@@ -200,7 +229,10 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     for n in keys:
         m = modes[n]
         key = "amp_perbin" if amp_form == "perbin" else "amp_centroid"
-        t, amp, coh = m["time"], np.asarray(m[key], float), np.asarray(m["coherence"], float)
+        t = m["time"]
+        amp = np.asarray(m[key], float)
+        coh = np.asarray(m["coherence"], float)
+        frq = np.asarray(m["freq"], float)
         floor = m["noise_floor_perbin" if amp_form == "perbin"
                   else "noise_floor_centroid"]
         if not np.isfinite(floor) or floor <= 0:
@@ -215,7 +247,7 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
         sig = amp / floor if normalize_floor else amp
         win = (t >= t_a) & (t <= t_b)
         traces[int(n)] = {"time": t[win], "amp": sig[win], "coherence": coh[win],
-                          "floor": floor}
+                          "freq": frq[win], "floor": floor}
     if not traces:
         out["reason"] = "no usable OMAHA trace"
         return out
@@ -255,21 +287,43 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     return out
 
 
-def detect_ladder(sig, ladder, n_detect=1, debounce=0.008):
-    """First crossing time of the n=`n_detect` trace, for every ladder level."""
+def detect_ladder(sig, ladder, n_detect=1, debounce=0.008,
+                  freq_step_max=None):
+    """Per ladder level: the first crossing time, and Fa and coherence there.
+
+    Fa at the crossing is the mode frequency at onset.  It costs nothing -- it
+    is already computed on that slice -- and it is what separates a rotating
+    event from a locked one, feeds a frequency-drop detector, and gives the
+    survival table a screening column.  Columns are rm/fa/co at the same level,
+    so a threshold selects a consistent triple.
+    """
     tr = sig["traces"].get(int(n_detect))
     if tr is None:
         # Returning NaN here would write a CSV full of nan with no explanation.
         raise ValueError(
             f"no trace for n={n_detect} on shot {sig.get('shot')}; "
             f"available: {sorted(sig['traces'])}")
-    return {f"rm{lv:.5f}": schmitt_first_crossing(tr["time"], tr["amp"], lv, debounce)
-            for lv in ladder}
+    t, frq, coh = tr["time"], tr["freq"], tr["coherence"]
+    out = {}
+    for lv in ladder:
+        tc = schmitt_first_crossing(t, tr["amp"], lv, debounce,
+                                    freq=frq if freq_step_max else None,
+                                    freq_step_max=freq_step_max)
+        out[f"rm{lv:.5f}"] = tc
+        if np.isfinite(tc) and t.size:
+            k = int(np.argmin(np.abs(t - tc)))      # the slice that crossed
+            out[f"fa{lv:.5f}"] = float(frq[k])
+            out[f"co{lv:.5f}"] = float(coh[k])
+        else:
+            out[f"fa{lv:.5f}"] = np.nan
+            out[f"co{lv:.5f}"] = np.nan
+    return out
 
 
 def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       t_start=0.2, n_detect=1, debounce=0.008,
                       coherence_min=0.0, ft_cfg=None, normalize_floor=False,
+                      freq_step_max=None,
                       absolute_n=True, amp_form="centroid"):
     """Run the detector over `shots` and return the ladder table."""
     ladder = DEFAULT_LADDER if ladder is None else np.asarray(ladder)
@@ -306,7 +360,8 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                "floor": sig["traces"][int(n_detect)]["floor"],
                "truncated": int(sig["truncated"]),
                "lost_exposure": sig["lost_exposure"]}
-        row.update(detect_ladder(sig, ladder, n_detect, debounce))
+        row.update(detect_ladder(sig, ladder, n_detect, debounce,
+                                 freq_step_max))
         rows.append(row)
         print(f"{shot}: ok  window [{sig['tsof']:.4f}, {sig['teof']:.4f}] s")
 
@@ -317,7 +372,8 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
 def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                NFFT=512, t_start=0.2, out_csv=None, coherence_min=0.0,
                debounce=0.008, n_detect=1, normalize_floor=False,
-               ladder_spec=None, absolute_n=True, amp_form="centroid"):
+               ladder_spec=None, absolute_n=True, amp_form="centroid",
+               freq_step_max=None):
     client = pyuda.Client()
     outputs = {}
 
@@ -333,7 +389,8 @@ def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                                 n_detect=n_detect, debounce=debounce,
                                 coherence_min=coherence_min,
                                 normalize_floor=normalize_floor,
-                                absolute_n=absolute_n, amp_form=amp_form)
+                                absolute_n=absolute_n, amp_form=amp_form,
+                                freq_step_max=freq_step_max)
         outputs["detector"] = det
         if out_csv:
             det["table"].to_csv(out_csv, index=False)
@@ -369,6 +426,11 @@ def main():
                         help="zero frequency bins whose toroidal-fit coherence is "
                              "below this, before the amplitude sum")
     parser.add_argument("--out-csv", type=str, default=None)
+    parser.add_argument("--freq-step-max", type=float, default=None,
+                        help="OFF by default. Reject a slice whose Fa jumped "
+                             "more than this many Hz from the previous one. "
+                             "1000-2000 passes chirps and locking transitions "
+                             "while rejecting noise, which hops ~16 kHz/slice")
     parser.add_argument("--normalize-floor", action="store_true",
                         help="divide the amplitude by each shot's pre-plasma "
                              "floor and use a signal-to-floor ladder; off by "
@@ -404,6 +466,7 @@ def main():
         ladder_spec=(args.ladder_min, args.ladder_max, args.ladder_num),
         absolute_n=not args.signed_n,
         amp_form=args.amp_form,
+        freq_step_max=args.freq_step_max,
     )
 
 
