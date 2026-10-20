@@ -23,12 +23,16 @@ recomputation over the database.
 |---|---|
 | `run_master.py` | Driver. `collect_signals`, `detect_ladder`, `build_rm_detector`, `schmitt_first_crossing` |
 | `saddle_analysis.py` | Original OMAHA routine, four defects repaired. `saddle_analysis_one_shot`, `run_batch` |
-| `saddle_extras.py` | Additions. `amplitude_with_coherence`, `noise_floor`, `analyze_shot`, `NTOR_BOTH_SIGNS` |
+| `saddle_extras.py` | Additions. `amplitude_with_coherence`, `amplitude_diiid`, `noise_floor`, `analyze_shot` |
 | `flattop.py` | Flat-top windowing from Ip. `find_flattop`, `FlatTopConfig` |
 | `compare_lf_hf.py` | Transfer function slow(LF)/fast(HF) on one coil: same quantity, time integral, or derivative |
 | `probe_timebase.py` | OMAHA slow time-step distribution, where non-uniformity sits, and what `load_omaha`'s slice keeps |
 | `probe_omaha.py` | Prints OMAHA channel units/description and any calibration column in `omaha_coils` |
 | `check_equivalence.py` | Asserts on real data that the retrofit still matches upstream |
+| `check_flattop.py` | `find_flattop` alone over a shot list; every constant is a CLI flag |
+| `coherence_survey.py` | Per-bin coherence and power-kept per gate, against a simulated noise floor |
+| `compare_pre_plasma.py` | Vacuum vs flat-top: is the coherent power plasma or instrumental? |
+| `ladder_base_rate.py` | Ladder CSV -> events, dwell and base hazard per level |
 | `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
 | `plot_mode_track.py` | One shot: gated spectrogram per \|n\| overlaid, with Fa tracks |
 | `make_annotation.py` | Ladder CSV + a threshold -> the 7-column survival table |
@@ -41,7 +45,7 @@ recomputation over the database.
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite; runs without Freya |
+| `tests/` | Offline test suite, 7 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two
@@ -88,23 +92,25 @@ python make_annotation.py rm_ladder.csv --threshold <knee> --out joint.csv
 python extract_parallel.py --annotation joint.csv --tag EPM \
     --store harvest_EPM --workers 8                   # features
 python extract_parallel.py --store harvest_EPM --consolidate feat_EPM.pickle
+python extract_parallel.py --annotation joint.csv --tag EPQ \
+    --store harvest_EPQ --workers 8
+python extract_parallel.py --store harvest_EPQ --consolidate feat_EPQ.pickle
+python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \
+    --out merged.pickle                               # the survival table
 ```
 
 The threshold enters only at `make_annotation`, so changing your mind means
-redoing the last three steps, not the detector.
+redoing from there, not the detector. `run-study.sh` covers everything up to
+the consolidated pickles; the merge is a separate call because it joins two
+study outputs.
 
-On Freya, in order:
+Checks worth running first on a new shot range or after a node-map edit:
 
 ```bash
-# 1. does the retrofit still match upstream on real data?
-python check_equivalence.py --shot 47000
-
-# 2. original batch sweep (unchanged output format + .dropped.json sidecar)
-python saddle_analysis.py --shot-min 47000 --shot-max 47100
-
-# 3. the detector: threshold ladder -> CSV
-python run_master.py --shots 47000 47001 47002 --build-detector \
-    --coherence-min 0.6 --out-csv rm_ladder_47000.csv
+python check_equivalence.py --shot 47000      # retrofit still matches upstream
+python check_flattop.py --shots 47000 47001   # the windowing constants
+python extract_features.py --probe 47002      # every EPM node resolves
+python compare_trees.py --shot 47002          # EPQ really does add constraints
 ```
 
 ### Finding Giovannozzi's modules
@@ -151,18 +157,31 @@ run_master.main()
       ├── collect_signals(shot, client, ...)
       │     ├── client.get("/AMC/PLASMA_CURRENT")      measured Ip, kA -> MA
       │     ├── flattop.find_flattop(t, ip, cfg)       -> FlatTop(ok, t_a, t_b, ...)
-      │     ├── saddle_extras.analyze_shot(shot, NFFT, ntor)
+      │     │     window intersected with the OMAHA record
+      │     ├── saddle_extras.analyze_shot(shot, NFFT, ntor, coh_min)
       │     │     ├── saddle_data.load_omaha_slow      -> SaddleFull
       │     │     ├── SaddleFull.spectrum(NFFT)        -> Spectra
-      │     │     ├── Spectra.n_detection(ntor)        -> RecognizedModes
-      │     │     └── amplitude_with_coherence(rm, sel), noise_floor(...)
-      │     ├── snr = amp / noise_floor;  snr[coherence < gate] = NaN
+      │     │     ├── Spectra.n_detection([0, ±1..±4]) -> RecognizedModes
+      │     │     │     n=0 searched as the common-mode sink, never reported
+      │     │     ├── amplitude_with_coherence(rm, sel, coh_min)   centroid
+      │     │     ├── amplitude_diiid(rm, sel, coh_min)            per-bin
+      │     │     │     the gate acts per FREQUENCY BIN, inside the sum
+      │     │     └── noise_floor(...)
+      │     ├── amp in gauss; /floor only with --normalize-floor
       │     └── aux: XIM/DA/HM10/T, ANE/DENSITY, AYC/T_E
-      └── detect_ladder -> schmitt_first_crossing(time, snr, level, debounce)
-  -> DataFrame.to_csv
+      └── detect_ladder
+            schmitt_first_crossing(t, amp, level, debounce,
+                                   freq, freq_step_max)   continuity: off by default
+            -> rm<level>, fa<level>, co<level>
+  -> DataFrame.to_csv                                     the ladder
+
+make_annotation  ladder + threshold -> joint.csv (7 cols + fa_event, coh_event)
+extract_parallel analyze -> ChunkStore -> feat_EPM.pickle, feat_EPQ.pickle
+merge_pair       EPQ onto EPM at dt/4; label the last pre-event row within 2*dt
+                 -> X1, X2, T, ID, Y, matched
 ```
 
-## Two things that are not yet right
+## What is still not right
 
 **The amplitude scale is relative, not absolute.** Giovannozzi labels
 `damplitude_dt` as T/s and `amplitude` as T, but qualifies it: *"I'm saying T
@@ -207,24 +226,24 @@ Giovannozzi's). The two differ by a constant 0.867 on a pure line and more on a
 broadband spectrum; compare them on the same shots before choosing. Either way
 the ladder levels are relabelled by one constant, with no re-detection.
 
-**Toroidal handedness.** `Spectra.n_detection` projects onto `exp(+i n phi)`,
-so it detects modes whose spectral phase runs as `exp(-i n phi)`. A mode of the
-opposite sense is invisible to a positive-only search list — and, worse,
-inflates the *ungated* amplitude of every n at once. `NTOR_DEFAULT` therefore
-carries both signs, matching Giovannozzi's instruction that `n_detection` takes
-*"a list of toroidal mode number (positive and negative)"*. Which half carries
-the coherence tells you the sense of rotation. See `docs/` §9.6.
+**Toroidal handedness — resolved, by not asking.** `Spectra.n_detection`
+projects onto `exp(+i n phi)`, so it detects modes whose spectral phase runs as
+`exp(-i n phi)`. A positive-only search list is blind to the opposite sense and,
+worse, inflates the *ungated* amplitude of every n at once.
 
-**The detector selects on |n|, as DIII-D does** (`abolute-n` in `modespyec`,
-i.e. `get_amplitude(nsigned=False)`). `analyze_shot(absolute_n=True)` always
-searches both signs, keys its output by |n|, and pools the bins the argmax
-assigned to `+|n|` or `-|n|`; the coherence gate reads the row of whichever sign
-each bin was assigned. `--n-detect 1` therefore means |n| = 1 whatever the sense
-of rotation. `--signed-n` restores the old signed selection for comparison, and
-`amplitude_with_coherence(absolute_n=False)` remains bit-identical to upstream.
-The ladder's `whichn` column is |n|. Note the 5-coil OMAHA subset spans only
-~60° of toroidal angle, so |n| = 1 vs 2 aliasing, not the sign, is the residual
-risk.
+Rather than determine the sense per shot, the detector pools it away:
+`analyze_shot(absolute_n=True)`, the default, always searches both signs, keys
+its output by |n|, and pools the bins the argmax assigned to `+|n|` or `-|n|`.
+`--n-detect 1` therefore means |n| = 1 whatever the rotation sense, and the
+ladder's `whichn` column is |n|. This is DIII-D's `get_amplitude(nsigned=False)`
+convention, and it suits the hardware: the 5-coil OMAHA subset spans ~60 deg,
+on which the +1 and -1 projections are 74% parallel, so reporting them
+separately would claim a distinction the array cannot make.
+
+`--signed-n` restores the old signed selection, and
+`amplitude_with_coherence(absolute_n=False, coh_min=0)` stays bit-identical to
+upstream. The residual geometric risk is |n| = 1 against |n| = 2 aliasing, not
+the sign.
 
 ## The coherence gate goes inside the frequency sum
 
@@ -312,8 +331,9 @@ discards the coherence `n_detection` already computed. Ours returns the
 power-weighted coherence per slice alongside, so it can be gated on and
 inspected.
 
-Separately, `FMIN_DEFAULT` moved from 100 Hz to 2 kHz — a default in
-`saddle_analysis.py`, not a change to the selector.
+Separately, `FMIN_DEFAULT` moved from 100 Hz to 1 kHz — Giovannozzi's own
+example value. That is a default in `saddle_analysis.py`, not a change to the
+selector.
 
 ## n=0 absorbs the common mode
 
@@ -344,8 +364,10 @@ under gating: strip the high-frequency bins and `Fa` collapses, so
 `1/Fa` grew 23x, inflating the pre-plasma amplitude 13-fold. An amplitude that
 grows when you remove bins from the sum is not an amplitude.
 
-**`FMIN_DEFAULT` is 2 kHz**, up from 100 Hz, which had put the lowest FFT bin
-inside the band.
+**`FMIN_DEFAULT` is 1 kHz**, up from 100 Hz, which had put the lowest FFT bin
+(390.6 Hz) inside the band. It sat at 2 kHz briefly; with n=0 absorbing the
+drift the floor no longer has to do that job, so it is back at Giovannozzi's
+own example value. Bins 1 and 2 are excluded, bin 3 up is kept.
 
 ### What this invalidates
 
@@ -354,34 +376,17 @@ ladder result predate these fixes. The "coherent minority holding half the
 power" may have been the common mode. Rerun `coherence_survey` first — it is
 cheap, and it says whether a real plateau survives.
 
-## Where the gate goes: 0.60 (SUPERSEDED, see above)
+## Where the gate went: 0.60, now superseded
 
-Measured on 93 shots of 47000-47099 with `coherence_survey.py` — 10.1M in-band
-bins, 5 OMAHA coils at phi = [36.8, 26.5, 4.0, -5.0, -23.0]:
+`coherence_survey` on 93 shots once showed power-kept flat across gates
+0.40-0.70 while bins-kept fell ninefold, which read as a coherent minority
+holding half the in-band power. That measurement predates the n=0 fix, and the
+plateau was plausibly the common mode. **Rerun `coherence_survey` before
+trusting any gate value**; the method is sound, the number is not.
 
-| gate | bins kept | power kept | noise through |
-|---|---|---|---|
-| 0.20 | 80.5% | 92.4% | 100% |
-| 0.30 | 42.7% | 64.5% | 99.9% |
-| 0.40 | 15.9% | 53.5% | 52.0% |
-| 0.50 | 4.9% | 50.4% | 2.1% |
-| **0.60** | **2.8%** | **48.8%** | **0.005%** |
-| 0.70 | 1.7% | 45.3% | 0% |
-| 0.80 | 0.76% | 19.3% | 0% |
-
-Power kept is flat across 0.40–0.70 while bins kept falls ninefold and noise
-leakage collapses to zero. That shelf is the detection: about half the in-band
-power sits in a small, highly coherent population and the rest is noise spread
-over millions of bins. At 0.80 power kept falls to 19.3% — the gate has started
-cutting real signal — so the shelf ends near 0.70.
-
-**0.60** leaks roughly 500 noise bins in 10 million while keeping 48.8% of the
-power. Run 0.55 and 0.70 as the sensitivity pair, the way DIII-D repeats its
-whole study over `POINT-A` … `POINT-F`.
-
-The simulated noise floor (median 0.402 on this geometry) sits *above* the
-observed median of 0.279, so the simulation is a conservative white-noise
-idealisation — real leakage is lower than the table says, not higher.
+What replaced it as evidence is `compare_pre_plasma`, which asks whether the
+surviving power exists with no plasma in the vessel — a question no ladder
+shape can answer.
 
 ## Feature extraction
 
@@ -541,5 +546,11 @@ Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectra
 detector cannot see a DC island, and the 1 kHz band floor excludes one by
 construction); screening limits re-derived for an ST; the hazard model itself.
 
-EPQ and EPM appear to be the MAST-U counterparts of EFIT02 and EFIT01, so the
-matched-pair machinery should port with little change.
+EPQ really is the better-constrained tree — `compare_trees.py` confirms it uses
+constraints EPM does not — so the EFIT01/EFIT02 analogy holds and the
+matched-pair machinery ports. That part is done (`merge_pair.py`).
+
+Nothing in the equilibrium half has yet been run end to end on real data:
+`extract_features` has only been exercised through `--probe`. Five shots
+through the full chain will surface the unit assumptions, the `nhat` chord
+length and whether `lost_events` fires, in seconds rather than hours.
