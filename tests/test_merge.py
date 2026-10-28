@@ -3,7 +3,7 @@ import _paths  # noqa: F401
 import numpy as np
 
 from merge_pair import (create_merge, create_merged_tables, table_stack,
-                        derived_tolerances)
+                        derived_tolerances, accounting, match_slices)
 
 DT = 5.025e-3
 NAMES = ["a", "b", "error"]
@@ -60,7 +60,7 @@ def main():
     chk("shot absent from secondary is all-NaN, not dropped",
         not np.isfinite(T12[1]["features.2"]).any())
 
-    X1, X2c, T, ID, Y, matched = table_stack(
+    X1, X2c, T, ID, Y, matched, has2, usable1 = table_stack(
         T12, ["a", "b"], tol["event_delta"], verbose=False)
     chk("label on the LAST row of the event shot", Y[19] == 1 and Y[:19].sum() == 0)
     chk("censored shot carries no label", Y[20:].sum() == 0)
@@ -72,7 +72,7 @@ def main():
     late = rec(3, 0.10, 20, "EPM", event=1)
     late["tb"] = late["time"][-1] + 5 * DT          # 5 slices past the last row
     T12b = create_merged_tables([late], [], tol["merge_delta"], verbose=False)
-    _, _, _, _, Yb, _ = table_stack(T12b, ["a", "b"], tol["event_delta"],
+    _, _, _, _, Yb, _, _, _ = table_stack(T12b, ["a", "b"], tol["event_delta"],
                                     verbose=False)
     chk("event dropped when the last equilibrium is too far before it",
         Yb.sum() == 0)
@@ -90,9 +90,62 @@ def main():
     near = rec(4, 0.10, 20, "EPM", event=2)
     near["tb"] = near["time"][-1] + 1.5 * DT        # inside 2*dt
     T12c = create_merged_tables([near], [], tol["merge_delta"], verbose=False)
-    _, _, _, _, Yc, _ = table_stack(T12c, ["a", "b"], tol["event_delta"],
+    _, _, _, _, Yc, _, _, _ = table_stack(T12c, ["a", "b"], tol["event_delta"],
                                     verbose=False)
     chk("event kept when inside the tolerance, type preserved", Yc[-1] == 2)
+
+    # --- a missing slice and a NaN feature are different things --------------
+    # EPQ present on every slice, but its feature "a" is NaN on rows 5 and 6.
+    P = rec(5, 0.10, 20, "EPM", event=1)
+    Q = rec(5, 0.10, 20, "EPQ", offset=100.0)
+    Q["features"][[5, 6], 0] = np.nan
+    T12d = create_merged_tables([P], [Q], tol["merge_delta"], verbose=False)
+    X1d, X2d, Td, IDd, Yd, md, hd, ud = table_stack(
+        T12d, ["a", "b"], tol["event_delta"], verbose=False)
+    chk("slice with a NaN feature still counts as having a slice", hd.all())
+    chk("...but is not a usable pair", (~md[[5, 6]]).all() and md.sum() == 18)
+    chk("the primary rows stay usable", ud.all())
+
+    # EPQ stops after row 9: rows 10.. have no slice at all
+    Q2 = rec(6, 0.10, 10, "EPQ", offset=100.0)
+    P2 = rec(6, 0.10, 20, "EPM")
+    T12e = create_merged_tables([P2], [Q2], tol["merge_delta"], verbose=False)
+    _, _, _, _, _, me, he, ue = table_stack(
+        T12e, ["a", "b"], tol["event_delta"], verbose=False)
+    chk("rows past the end of the secondary have no slice",
+        he[:10].all() and not he[10:].any())
+    chk("they are not matched either", me[:10].all() and not me[10:].any())
+
+    # an event whose LABEL row has a NaN is counted, not silently lost
+    R = rec(7, 0.10, 20, "EPM", event=1)
+    R["features"][19, 1] = np.nan                       # NaN on the last row
+    S = rec(7, 0.10, 20, "EPQ", offset=100.0)
+    T12f = create_merged_tables([R], [S], tol["merge_delta"], verbose=False)
+    X1f, X2f, Tf, IDf, Yf, mf, hf, uf = table_stack(
+        T12f, ["a", "b"], tol["event_delta"], verbose=False)
+    acc = accounting(["a", "b"], X1f, X2f, Yf, hf, uf, mf, verbose=False)
+    chk("event is labelled", acc["events"] == 1)
+    chk("event lost to NaN in the label row is counted",
+        acc["events_lost_nan_X1"] == 1 and acc["events_usable_X1"] == 0)
+    chk("and so is absent from the pair", acc["events_usable_pair"] == 0)
+    chk("NaN fraction reported per feature",
+        abs(acc["nan_frac_X1"]["b"] - 1 / 20) < 1e-12
+        and acc["nan_frac_X1"]["a"] == 0)
+
+    # event survives in the primary but the SECONDARY lacks its slice
+    U = rec(8, 0.10, 20, "EPM", event=1)
+    V = rec(8, 0.10, 19, "EPQ", offset=100.0)           # EPQ stops one row early
+    T12g = create_merged_tables([U], [V], tol["merge_delta"], verbose=False)
+    X1g, X2g, Tg, IDg, Yg, mg, hg, ug = table_stack(
+        T12g, ["a", "b"], tol["event_delta"], verbose=False)
+    acc = accounting(["a", "b"], X1g, X2g, Yg, hg, ug, mg, verbose=False)
+    chk("event usable in EPM alone, lost only to the pairing",
+        acc["events_usable_X1"] == 1 and acc["events_usable_pair"] == 0
+        and acc["events_lost_to_pairing"] == 1)
+
+    idx = match_slices(np.array([0.1, 0.2]), np.array([0.1001]), 1e-3)
+    chk("match_slices gives -1 where nothing falls in the window",
+        idx[0] == 0 and idx[1] == -1)
     return 0 if ok else 1
 
 
