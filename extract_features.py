@@ -110,7 +110,11 @@ def probe(shot, tag, client):
                 continue
             d, t, u = r
             tinfo = f"t[{t.size}] {t[0]:.4f}..{t[-1]:.4f}" if t is not None and t.size else "no time"
-            print(f"    {name:9s} {str(d.shape):>14s}  {str(u):>12s}  {tinfo}")
+            axis = ""
+            if (t is not None and t.size and d.ndim >= 2
+                    and d.shape[0] != t.size and d.shape[-1] == t.size):
+                axis = "   (time on the LAST axis; fetch_record transposes)"
+            print(f"    {name:9s} {str(d.shape):>14s}  {str(u):>12s}  {tinfo}{axis}")
     for name, path in NODES.EXTERNAL.items():
         try:
             v = client.get(path, shot)
@@ -134,15 +138,31 @@ def fetch_record(shot, tag, client):
     if nt < 2:
         raise RuntimeError(f"{tag}/TIME has {nt} points")
 
+    rec["transposed"] = []
+
     def need(group, name, path):
         r = _get(client, tag, path, shot)
         if r is None or r[0] is None:
             raise RuntimeError(f"missing {group}.{name} ({tag}/{path})")
         d = np.asarray(r[0], float)
+        # The time axis is not always first: a profile can arrive as
+        # (n_psi, nt), e.g. 65 x nt on MAST-U.  Everything downstream indexes
+        # time first, so put it there -- by matching the length against TIME,
+        # never by guessing.  A square array cannot be told apart that way.
+        if d.ndim >= 2:
+            first, last = d.shape[0] == nt, d.shape[-1] == nt
+            if first and last:
+                raise RuntimeError(
+                    f"{name}: shape {d.shape} has {nt} (= len TIME) on both "
+                    f"the first and last axis; cannot tell which is time")
+            if last and not first:
+                d = np.moveaxis(d, -1, 0)
+                rec["transposed"].append(name)
         # (6) time bases must agree -- no silent interpolation
         if d.ndim >= 1 and d.shape[0] != nt:
             raise RuntimeError(
-                f"{name}: leading axis {d.shape[0]} != {tag}/TIME {nt}")
+                f"{name}: no axis of shape {r[0].shape} matches "
+                f"{tag}/TIME ({nt})")
         return d
 
     for n, p in NODES.GLOBALS.items():
@@ -349,7 +369,8 @@ def extract_shot(shot, tag, client, ta=None, tb=None, use_alts=False,
             "feature-names": names, "R0": rec["R0"], "R0_source": rec["R0_source"],
             "ipsign": rec["ipsign"], "btsign": rec["btsign"],
             "ta": ta, "tb": tb, "clipped_to_eq_start": clipped_low,
-            "badchi2": rec.get("badchi2"), "eqstat": rec.get("eqstat")}
+            "badchi2": rec.get("badchi2"), "eqstat": rec.get("eqstat"),
+            "transposed": rec.get("transposed", [])}
 
 
 def read_annotation(path):
@@ -404,6 +425,8 @@ def main():
             r["event"] = ann[s]["event"]
             out.append(r)
             flag = "  [ta clipped to eq start]" if r["clipped_to_eq_start"] else ""
+            if r["transposed"]:
+                flag += f"  [time axis moved to front: {','.join(r['transposed'])}]"
             print(f"{s}: {r['features'].shape[0]} slices x "
                   f"{r['features'].shape[1]} features, R0={r['R0']:.4f} "
                   f"({r['R0_source']}){flag}")
