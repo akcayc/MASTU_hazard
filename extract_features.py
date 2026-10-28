@@ -145,6 +145,10 @@ def fetch_record(shot, tag, client):
         if r is None or r[0] is None:
             raise RuntimeError(f"missing {group}.{name} ({tag}/{path})")
         d = np.asarray(r[0], float)
+        # psin is the radial grid itself, one (n_psi,) vector shared by every
+        # slice; it has no time axis to check or move.
+        if name == "psin" and d.ndim == 1:
+            return d
         # The time axis is not always first: a profile can arrive as
         # (n_psi, nt), e.g. 65 x nt on MAST-U.  Everything downstream indexes
         # time first, so put it there -- by matching the length against TIME,
