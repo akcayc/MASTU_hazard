@@ -64,6 +64,7 @@ Everything at once:
 
 ```bash
 ./run-study.sh GATE-060 0.60
+./run-study.sh GATE-060 0.60 --amp-form perbin    # DIII-D's estimator; default is centroid
 ```
 
 Each stage is skipped if its output exists, so a rerun resumes. Parameters are
@@ -517,13 +518,20 @@ python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \
 
 EPM is the primary, as EFIT01 is for DIII-D. **Every EPM row is kept**; EPQ
 contributes NaN wherever it has no slice in the matching window, and a shot
-absent from EPQ entirely keeps its EPM rows with an all-NaN secondary. So the
-choice between
+absent from EPQ entirely keeps its EPM rows with an all-NaN secondary.
+`--secondary` may be omitted to work on EPM alone. The choice of analysis is
+made downstream, by mask, so both run off one harvest:
 
-    full EPM        X1, every row
-    matched pair    X1 and X2 where `matched`
+    has_secondary   an EPQ slice exists in the window
+    usable1         every selected feature is finite in EPM -- the full-EPM rows
+    matched         has_secondary AND every feature finite in both -- the pair
 
-is made downstream, not at merge time — both analyses run off one harvest.
+A missing slice and a slice with one NaN feature used to look the same. They
+no longer do, and the merge prints the NaN fraction per feature plus an event
+ledger: how many labelled events are usable in EPM alone, how many are lost
+because the label row itself has a NaN, and how many are lost only to the
+pairing. That last count matters because a NaN on the label row removes the
+event silently as soon as a model filters NaN rows.
 
 Tolerances come from the measured 5.03 ms cadence, not from DIII-D's 20 ms
 grid: merge delta `dt/4` = 1.26 ms, `event_delta` `2*dt` = 10.05 ms. Because

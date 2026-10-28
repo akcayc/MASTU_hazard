@@ -2,7 +2,7 @@
 #
 # One MAST-U tearing-mode hazard study, end to end.
 #
-#   ./run-study.sh <folder> [coherence-gate] [threshold-gauss]
+#   ./run-study.sh <folder> [coherence-gate] [threshold-gauss] [--amp-form centroid|perbin]
 #
 # EXAMPLE (a gate sensitivity scan, the analogue of DIII-D's POINT-A..F):
 #   ./run-study.sh GATE-055 0.55
@@ -22,6 +22,24 @@
 #   PARALLEL_TAGS        true -> harvest EPM and EPQ concurrently
 #
 set -euo pipefail
+
+# --amp-form may sit anywhere among the arguments; the rest stay positional.
+# "centroid" is Giovannozzi's Ba and the default; "perbin" is DIII-D's.
+AMP_FORM=centroid
+_pos=()
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --amp-form)    AMP_FORM=${2:?--amp-form needs a value}; shift 2 ;;
+    --amp-form=*)  AMP_FORM=${1#*=}; shift ;;
+    *)             _pos+=("$1"); shift ;;
+  esac
+done
+set -- ${_pos[@]+"${_pos[@]}"}
+case $AMP_FORM in
+  centroid|perbin) ;;
+  *) echo "ERROR: --amp-form must be centroid or perbin, not '$AMP_FORM'" >&2
+     exit 1 ;;
+esac
 
 if [[ $# -lt 1 ]]; then
   sed -n '2,20p' "$0" | sed 's/^# \?//'
@@ -54,16 +72,20 @@ check_param () {                 # $1 = key, $2 = value asked for
 }
 
 if [[ -f $params ]]; then
+  # folders pinned before --amp-form existed were all built with the default
+  grep -q "^AMP_FORM=" "$params" || echo "AMP_FORM=centroid" >> "$params"
   check_param GATE     "$gate"
   check_param SHOT_MIN "$SHOT_MIN"
   check_param SHOT_MAX "$SHOT_MAX"
   check_param N_DETECT "$N_DETECT"
+  check_param AMP_FORM "$AMP_FORM"
   echo "parameters match $params"
 else
   { echo "GATE=$gate"
     echo "SHOT_MIN=$SHOT_MIN"
     echo "SHOT_MAX=$SHOT_MAX"
-    echo "N_DETECT=$N_DETECT"; } > "$params"
+    echo "N_DETECT=$N_DETECT"
+    echo "AMP_FORM=$AMP_FORM"; } > "$params"
   echo "pinned parameters to $params"
 fi
 
@@ -71,6 +93,7 @@ echo "study folder : $folder"
 echo "shots        : $SHOT_MIN .. $((SHOT_MAX - 1))"
 echo "coherence    : $gate"
 echo "n_detect     : $N_DETECT"
+echo "amp form     : $AMP_FORM"
 
 ladder="$folder/rm_ladder_g${gate}.csv"
 joint="$folder/joint.csv"
@@ -82,7 +105,7 @@ else
   echo "[1/5] detector"
   python run_master.py --shots $(seq "$SHOT_MIN" $((SHOT_MAX - 1))) \
     --build-detector --coherence-min "$gate" --n-detect "$N_DETECT" \
-    --out-csv "$ladder"
+    --amp-form "$AMP_FORM" --out-csv "$ladder"
 fi
 
 # --- 2. base-rate curve and figures ---------------------------------------
@@ -142,5 +165,6 @@ echo
 echo "  $folder/"
 ls -1 "$folder" | sed 's/^/    /'
 echo
-echo "  Still to be written: the EPM<->EPQ merge on matched time bases"
-echo "  (merge delta ~ dt/4 = 1.26 ms), the survival table, and the model."
+echo "  Next: python merge_pair.py --primary $folder/feat_EPM.pickle \\"
+echo "            --secondary $folder/feat_EPQ.pickle --out $folder/merged.pickle"
+echo "  (omit --secondary to work on EPM alone).  Still to be written: the model."
