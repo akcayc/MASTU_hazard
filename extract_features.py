@@ -278,28 +278,46 @@ def derive(rec):
     return rec
 
 
+def _pchip_rows(x, Y, evals):
+    """Pchip over radius for each slice; NaN rows where the slice is not finite.
+
+    A failed or not-yet-converged equilibrium (early in the shot, say) has
+    NaN across most of its quantities, profiles included.  scipy refuses the
+    whole array if any element is non-finite, so fit only the finite slices
+    and leave the rest NaN -- the row is then lost like any other NaN row,
+    and shows up in merge_pair's per-feature accounting.
+
+    evals is a list of (x0, nu); returns an (nt, len(evals)) array.
+    """
+    Y = np.asarray(Y, float)
+    out = np.full((Y.shape[0], len(evals)), np.nan)
+    ok = np.all(np.isfinite(Y), axis=1)
+    if ok.any():
+        f = scinterp.PchipInterpolator(x, Y[ok], axis=1)
+        for j, (x0, nu) in enumerate(evals):
+            out[ok, j] = f(x0, nu=nu)
+    return out
+
+
 # (2) pres on sqrt(psi_n); (3) scale carries the /100
 def featurize_pres(rec):
     psin = np.asarray(rec["psin"], float)
     psin = psin[0] if psin.ndim == 2 else psin
     pscale = (np.asarray(rec["bt0"], float) ** 2) / (2 * MU0) / 100.0
-    f = scinterp.PchipInterpolator(np.sqrt(psin), np.asarray(rec["pres"], float), axis=1)
-    return (np.column_stack([f(0.0) / pscale, f(0.50) / pscale,
-                             f(0.50, nu=1) / pscale]),
-            ["pres0", "pres50", "dpres50"])
+    P = _pchip_rows(np.sqrt(psin), rec["pres"], [(0.0, 0), (0.50, 0), (0.50, 1)])
+    return P / pscale[:, None], ["pres0", "pres50", "dpres50"]
 
 
 # (2) qpsi on psi_n directly
 def featurize_qpsi(rec):
     psin = np.asarray(rec["psin"], float)
     psin = psin[0] if psin.ndim == 2 else psin
-    f = scinterp.PchipInterpolator(psin, np.asarray(rec["qpsi"], float), axis=1)
-    cols = [f(0.33), f(0.67), f(0.67, nu=1)]
+    ev = [(0.33, 0), (0.67, 0), (0.67, 1)]
     names = ["q33", "q67", "dq67"]
     if NODES.Q95_FROM_PROFILE:          # q95 is absent from GLOBALPARAMETERS
-        cols.insert(0, f(0.95))
+        ev.insert(0, (0.95, 0))
         names.insert(0, "q95")
-    return np.column_stack(cols), names
+    return _pchip_rows(psin, rec["qpsi"], ev), names
 
 
 def make_descriptor_table(rec, use_alts=False, include_glitch=True):
