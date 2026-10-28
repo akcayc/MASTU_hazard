@@ -19,9 +19,15 @@ With no locked-mode detector, tlm is always NaN and ievent is 0 or 1.  The
 schema keeps the column so the LM branch can be added without a format change.
 
     python make_annotation.py rm_ladder.csv --threshold 0.0137 --out joint.csv
+        -> writes joint_threshold0.0137.csv
+
+The threshold actually applied (the ladder column it snaps to, 5 significant
+digits like MATLAB's num2str) is appended to the --out name, since nothing
+inside the CSV records it.
 """
 
 import argparse
+import os
 import numpy as np
 import pandas as pd
 
@@ -38,6 +44,12 @@ def pick_column(df, threshold):
     lv = np.array([float(c[2:]) for c in cols])
     i = int(np.argmin(np.abs(lv - threshold)))
     return cols[i], float(lv[i])
+
+
+def threshold_path(out, threshold):
+    """joint.csv, 0.0137 -> joint_threshold0.0137.csv"""
+    root, ext = os.path.splitext(out)
+    return f"{root}_threshold{threshold:.5g}{ext or '.csv'}"
 
 
 def build(df, col, eq_start, fa_col=None, co_col=None):
@@ -100,9 +112,10 @@ def main():
     if ann.empty:
         raise SystemExit("no usable shots")
     ann = ann.sort_values("shot")
+    out = threshold_path(a.out, lv)
     # the first seven columns are the format extract_features reads; the two
     # that follow are extra and are ignored by anything that does not want them
-    ann.to_csv(a.out, index=False,
+    ann.to_csv(out, index=False,
                columns=["shot", "tsof", "teof", "trm", "tlm", "tevent", "ievent",
                         "fa_event", "coh_event"])
 
@@ -136,7 +149,7 @@ def main():
     print(f"\n  at a 5.03 ms equilibrium cadence this is roughly "
           f"{int(dwell / 5.025e-3)} rows, base rate E/N ~ "
           f"{E / max(dwell / 5.025e-3, 1):.2e}")
-    print(f"  wrote {a.out}")
+    print(f"  wrote {out}")
     return 0
 
 

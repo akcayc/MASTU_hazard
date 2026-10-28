@@ -126,13 +126,22 @@ if [[ -z $threshold ]]; then
 fi
 echo "THRESHOLD=$threshold" >> "$params"
 
-if [[ -f $joint ]]; then
+# make_annotation appends _threshold<value> to the name it is given, so the
+# actual file is found afterwards; a plain joint.csv is a legacy folder
+found=$(ls "$folder"/joint_threshold*.csv 2>/dev/null | head -1 || true)
+if [[ -n $found ]]; then
+  joint=$found
   echo "skipping: $joint already exists"
+elif [[ -f $joint ]]; then
+  echo "skipping: $joint already exists (legacy name, no threshold in it)"
 else
   echo "[3/5] annotation at $threshold G"
   python make_annotation.py "$ladder" --threshold "$threshold" --out "$joint" \
     | tee "$folder/annotation.txt"
+  joint=$(grep -oE "wrote .*" "$folder/annotation.txt" | tail -1 | sed 's/^wrote //')
+  [[ -f $joint ]] || { echo "ERROR: make_annotation output not found" >&2; exit 1; }
 fi
+echo "JOINT=$joint" >> "$params"
 
 # --- 4. equilibrium features, one store per tree --------------------------
 harvest () {                      # $1 = EPM | EPQ

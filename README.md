@@ -90,7 +90,8 @@ python run_master.py --shots $(seq 47000 47099) --build-detector \
 python ladder_base_rate.py rm_ladder.csv              # find the knee
 python plot_ladder.py rm_ladder.csv --out scan        # figures
 python make_annotation.py rm_ladder.csv --threshold <knee> --out joint.csv
-python extract_parallel.py --annotation joint.csv --tag EPM \
+                                       # writes joint_threshold<value>.csv
+python extract_parallel.py --annotation joint_threshold<value>.csv --tag EPM \
     --store harvest_EPM --workers 8                   # features
 python extract_parallel.py --store harvest_EPM --consolidate feat_EPM.pickle
 python extract_parallel.py --annotation joint.csv --tag EPQ \
