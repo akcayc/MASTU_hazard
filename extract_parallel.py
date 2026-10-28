@@ -156,7 +156,12 @@ def main():
                                     "it. Advanced; see the module docstring")
     p.add_argument("--store", required=True, help="checkpoint directory")
     p.add_argument("--tag", default="EPM")
-    p.add_argument("--shots", type=int, nargs="+")
+    p.add_argument("--shots", type=int, nargs="+",
+                   help="explicit shot list; the annotation is the default")
+    p.add_argument("--shot-min", type=int,
+                   help="range start; shots in the range but not annotated are "
+                        "skipped, not an error")
+    p.add_argument("--shot-max", type=int, help="range end, exclusive")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--chunk-size", type=int, default=CP.CHUNK_SIZE)
     p.add_argument("--report-every", type=int, default=100)
@@ -166,6 +171,9 @@ def main():
     p.add_argument("--consolidate", help="merge the store into one pickle and exit")
     p.add_argument("--status", action="store_true", help="report the store and exit")
     a = p.parse_args()
+
+    if a.shot_min is not None and a.shot_max is None:
+        p.error("--shot-min needs --shot-max")
 
     store = CP.ChunkStore(a.store)
 
@@ -191,15 +199,31 @@ def main():
     else:
         p.error("--annotation is required (or --ladder; see the docstring)")
 
-    shots = a.shots or sorted(windows)
-    unknown = [s for s in shots if s not in windows]
-    if unknown:
-        src = a.annotation or a.ladder
+    if a.shots:
+        requested = list(a.shots)
+    elif a.shot_min is not None:
+        requested = list(range(a.shot_min, a.shot_max))
+    else:
+        requested = sorted(windows)
+
+    # A requested shot absent from the annotation is NORMAL, not an error: a
+    # shot with no plasma, no OMAHA record or a failed flat-top never reaches
+    # the annotation at all, so any range will contain more shots than the
+    # annotation does.  Intersect and say how many fell out.  Only an EMPTY
+    # intersection is a mistake -- wrong file, or a range nowhere near it.
+    src = a.annotation or a.ladder
+    shots = [s for s in requested if s in windows]
+    skipped = len(requested) - len(shots)
+    if not shots:
+        lo, hi = (min(windows), max(windows)) if windows else (None, None)
         raise SystemExit(
-            f"{len(unknown)} of {len(shots)} requested shots are not in {src}: "
-            f"{unknown[:8]}{' ...' if len(unknown) > 8 else ''}\n"
-            f"  the window and the event label both come from that file, so "
-            f"there is nothing to extract for them.")
+            f"none of the {len(requested)} requested shots are in {src}.\n"
+            f"  that file covers {lo}-{hi} ({len(windows)} shots); check the "
+            f"range or the file.")
+    if skipped:
+        print(f"  {len(shots)} of {len(requested)} requested shots are in {src}"
+              f" ({skipped} not annotated -- no plasma, no OMAHA record, or a "
+              f"failed flat-top)")
     run(shots, windows, events, a.tag.upper(), store, a.workers,
         a.min_timestamps, a.use_alts, not a.no_glitch, a.chunk_size,
         a.report_every)
