@@ -97,6 +97,12 @@ def table_stack(T12, features, event_delta, verbose=True):
     island degrades the fit -- attaching an onset label to a reconstruction
     from long before would be false, so the event is dropped and counted.
     """
+    if not any("event" in D for D in T12):
+        raise SystemExit(
+            "no record carries an 'event' key, so every shot would be treated "
+            "as censored and Y would be all zeros.\n"
+            "  Harvests made with --ladder are unlabelled by design; one made "
+            "with --annotation should carry the label.")
     N = sum(len(e["time"]) for e in T12)
     cols = [T12[0]["feature-names"].index(f) for f in features]
     X1 = np.full((N, len(cols)), np.nan)

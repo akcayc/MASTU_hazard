@@ -77,13 +77,19 @@ def windows_from_ladder(path):
 
 
 def windows_from_annotation(path):
-    """{shot: (ta, tb)} from a joint annotation CSV -- chops at tevent."""
+    """({shot: (ta, tb)}, {shot: event}) from a joint annotation CSV.
+
+    The event label MUST travel with the window.  Without it merge_pair's
+    `D.get("event", 0)` defaults to 0 and every shot becomes censored -- a
+    survival table with no events in it, and nothing to say so.
+    """
     ann = EF.read_annotation(path)
-    return {s: (v["ta"], v["tb"]) for s, v in ann.items()}
+    return ({s: (v["ta"], v["tb"]) for s, v in ann.items()},
+            {s: int(v["event"]) for s, v in ann.items()})
 
 
-def run(shots, windows, tag, store, workers, min_timestamps, use_alts,
-        include_glitch, chunk_size, report_every):
+def run(shots, windows, events, tag, store, workers, min_timestamps,
+        use_alts, include_glitch, chunk_size, report_every):
     todo = [s for s in shots if s not in store.done()]
     skipped = len(shots) - len(todo)
     if skipped:
@@ -98,9 +104,16 @@ def run(shots, windows, tag, store, workers, min_timestamps, use_alts,
     lock = threading.Lock()
 
     def work(shot):
-        ta, tb = windows.get(shot, (None, None))
-        return EF.extract_shot(shot, tag, client(), ta, tb, use_alts,
-                               include_glitch, min_timestamps)
+        if shot not in windows:
+            # Falling through with ta=tb=None would skip the chop and return a
+            # full, unlabelled record -- silently wrong rather than absent.
+            raise KeyError(f"shot {shot} is not in the annotation/ladder")
+        ta, tb = windows[shot]
+        rec = EF.extract_shot(shot, tag, client(), ta, tb, use_alts,
+                              include_glitch, min_timestamps)
+        if events is not None:
+            rec["event"] = int(events[shot])
+        return rec
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(work, s): s for s in todo}
@@ -167,8 +180,9 @@ def main():
         print(f"  {n} records, {nd} dropped -> {a.consolidate}")
         return 0
 
+    events = None
     if a.annotation:
-        windows = windows_from_annotation(a.annotation)
+        windows, events = windows_from_annotation(a.annotation)
     elif a.ladder:
         windows = windows_from_ladder(a.ladder)
         print("  WARNING --ladder: the table is NOT chopped at tevent, so it")
@@ -178,8 +192,17 @@ def main():
         p.error("--annotation is required (or --ladder; see the docstring)")
 
     shots = a.shots or sorted(windows)
-    run(shots, windows, a.tag.upper(), store, a.workers, a.min_timestamps,
-        a.use_alts, not a.no_glitch, a.chunk_size, a.report_every)
+    unknown = [s for s in shots if s not in windows]
+    if unknown:
+        src = a.annotation or a.ladder
+        raise SystemExit(
+            f"{len(unknown)} of {len(shots)} requested shots are not in {src}: "
+            f"{unknown[:8]}{' ...' if len(unknown) > 8 else ''}\n"
+            f"  the window and the event label both come from that file, so "
+            f"there is nothing to extract for them.")
+    run(shots, windows, events, a.tag.upper(), store, a.workers,
+        a.min_timestamps, a.use_alts, not a.no_glitch, a.chunk_size,
+        a.report_every)
 
     s = store.summary()
     print(f"  store: {s['chunks']} chunks, {s['shots']} shots, "

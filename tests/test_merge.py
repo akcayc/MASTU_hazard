@@ -77,6 +77,16 @@ def main():
     chk("event dropped when the last equilibrium is too far before it",
         Yb.sum() == 0)
 
+    # an unlabelled harvest must be refused, not silently all-censored
+    noev = rec(5, 0.10, 20, "EPM")
+    del noev["event"]
+    T12d = create_merged_tables([noev], [], tol["merge_delta"], verbose=False)
+    try:
+        table_stack(T12d, ["a", "b"], tol["event_delta"], verbose=False)
+        chk("unlabelled table refused", False)
+    except SystemExit:
+        chk("unlabelled table refused rather than all-censored", True)
+
     near = rec(4, 0.10, 20, "EPM", event=2)
     near["tb"] = near["time"][-1] + 1.5 * DT        # inside 2*dt
     T12c = create_merged_tables([near], [], tol["merge_delta"], verbose=False)
