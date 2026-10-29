@@ -17,7 +17,9 @@ panel one, so it would be the same curve in different units.  It is printed
 instead.
 
 Writes <out>.png, <out>.pdf and <out>_table.csv -- the table because the
-figure alone is not an accessible artifact.
+figure alone is not an accessible artifact -- plus <out>_linear.png/.pdf: the
+same counts on linear axes in one panel, the presentation form of the DIII-D
+event-count figure (brmEventsCounter / blmEventsCounter).
 """
 
 import argparse
@@ -96,6 +98,35 @@ def find_knee(lv, ev, slope, excess=1.0):
     return onset, steepest
 
 
+def plot_linear(curves, nshots, out, fs):
+    """Events vs threshold, linear axes, one panel -- for slides."""
+    fig, ax = plt.subplots(figsize=(8.0, 6.0))
+    fig.patch.set_facecolor(SURFACE)
+    for lv, ev, lab, c in curves:
+        m = ev > 0
+        ax.plot(lv[m], ev[m], color=c, lw=3.0, solid_capstyle="round",
+                label=lab, zorder=3)
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel("threshold  [gauss]", color=INK2, fontsize=fs["axis"])
+    ax.set_ylabel("events detected  (shots with a crossing)", color=INK2,
+                  fontsize=fs["axis"])
+    ax.set_title(f"Event counts vs detection threshold  ({nshots} MAST-U shots)",
+                 color=INK, fontsize=fs["title"] * 0.85, loc="left")
+    ax.set_facecolor(SURFACE)
+    ax.grid(True, color=GRID, lw=0.8, zorder=0)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(GRID)
+    ax.tick_params(colors=INK2, labelsize=fs["tick"])
+    ax.legend(frameon=False, fontsize=fs["legend"], labelcolor=INK2)
+    for ext in ("png", "pdf"):
+        fig.savefig(f"{out}_linear.{ext}", dpi=170, facecolor=SURFACE,
+                    bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("csv", nargs="+")
@@ -125,7 +156,7 @@ def main():
     # right margin leaves room for the direct labels at the larger type size
     fig.subplots_adjust(left=0.125, right=0.760, top=0.878, bottom=0.088)
 
-    rows, nshots, knees, ends = [], None, {}, []
+    rows, nshots, knees, ends, curves = [], None, {}, [], []
     for i, (path, lab) in enumerate(zip(a.csv, labels)):
         df = pd.read_csv(path)
         nshots = len(df)
@@ -134,6 +165,7 @@ def main():
         kn, steep = find_knee(lv, ev, sl, a.excess)
         knees[lab] = kn
         c = SERIES[i]
+        curves.append((lv, ev, lab, c))
 
         m = ev > 0
         ax1.plot(lv[m], ev[m], color=c, lw=2.4, solid_capstyle="round", zorder=3)
@@ -222,7 +254,9 @@ def main():
         fig.savefig(f"{a.out}.{ext}", dpi=170, facecolor=SURFACE,
                     bbox_inches="tight")
     pd.DataFrame(rows).to_csv(f"{a.out}_table.csv", index=False)
-    print(f"\nwrote {a.out}.png  {a.out}.pdf  {a.out}_table.csv")
+    plot_linear(curves, nshots, a.out, fs)
+    print(f"\nwrote {a.out}.png  {a.out}.pdf  {a.out}_table.csv  "
+          f"{a.out}_linear.png  {a.out}_linear.pdf")
     return 0
 
 
