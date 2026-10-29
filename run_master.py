@@ -237,8 +237,11 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
                   else "noise_floor_centroid"]
         if not np.isfinite(floor) or floor <= 0:
             floor = noise_floor(t, amp, t_pre=min(0.020, max(t_a * 0.5, 1e-3)))
+        # A gated run can strip the whole pre-breakdown window, leaving no
+        # floor.  The floor is only a divisor under normalize_floor; the gauss
+        # ladder never uses it, so the trace is kept and the floor recorded NaN.
         if not np.isfinite(floor) or floor <= 0:
-            continue
+            floor = np.nan
         amp = amp * GAUSS_PER_TESLA          # -> gauss
         floor = floor * GAUSS_PER_TESLA
         # No slice-level filter here: coherence_min was applied per frequency
