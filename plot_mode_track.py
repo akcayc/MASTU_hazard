@@ -69,9 +69,11 @@ def main():
                         "this multiple of that |n|'s own pre-plasma floor; Fa "
                         "is meaningless when no power is concentrated")
     p.add_argument("--out", default=None)
-    p.add_argument("--font-scale", type=float, default=1.0)
+    p.add_argument("--font-size", type=float, default=FS["axis"],
+                   help="axis-label size in points; every other type size "
+                        f"scales with it (default {FS['axis']:g})")
     a = p.parse_args()
-    fs = {k: v * a.font_scale for k, v in FS.items()}
+    fs = {k: v * a.font_size / FS["axis"] for k, v in FS.items()}
     nlist = sorted({abs(int(n)) for n in a.n_list if int(n) != 0})
     if len(nlist) > len(NCOLOURS):
         raise SystemExit(f"at most {len(NCOLOURS)} values of |n|; a 5th series "

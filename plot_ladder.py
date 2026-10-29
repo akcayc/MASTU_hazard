@@ -23,6 +23,7 @@ event-count figure (brmEventsCounter / blmEventsCounter).
 """
 
 import argparse
+import os
 import numpy as np
 import pandas as pd
 
@@ -41,7 +42,7 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
 #: direct labels stay legible up to four curves; past that the legend carries it
 MAX_DIRECT_LABELS = 4
 
-#: type sizes in points; --font-scale multiplies all of them together
+#: type sizes in points; --font-size sets `axis` and the rest scale with it
 FS = dict(title=17.0, subtitle=12.0, axis=13.0, tick=11.5, minor=10.0,
           legend=12.5, direct=12.5, note=11.5)
 INK, INK2, INK3 = "#0b0b0b", "#52514e", "#8a8984"
@@ -131,16 +132,21 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("csv", nargs="+")
     p.add_argument("--labels", nargs="+")
-    p.add_argument("--out", default="ladder")
+    p.add_argument("--out", default="ladder",
+                   help="output prefix; a .png/.pdf/.csv extension is dropped")
     p.add_argument("--smooth", type=int, default=5)
-    p.add_argument("--font-scale", type=float, default=1.0,
-                   help="multiply every type size (default 1.0)")
+    p.add_argument("--font-size", type=float, default=FS["axis"],
+                   help="axis-label size in points; every other type size "
+                        f"scales with it (default {FS['axis']:g})")
     p.add_argument("--excess", type=float, default=1.0,
                    help="how much steeper than the plateau counts "
                         "as the knee, in log-log slope units")
     a = p.parse_args()
     labels = a.labels or [f.rsplit("/", 1)[-1].replace(".csv", "") for f in a.csv]
-    fs = {k: v * a.font_scale for k, v in FS.items()}
+    root, ext = os.path.splitext(a.out)
+    if ext.lower() in (".png", ".pdf", ".csv"):
+        a.out = root
+    fs = {k: v * a.font_size / FS["axis"] for k, v in FS.items()}
     if len(a.csv) > len(SERIES):
         raise SystemExit(
             f"{len(a.csv)} curves requested but the categorical order has "
