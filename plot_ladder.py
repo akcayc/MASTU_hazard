@@ -109,7 +109,7 @@ def plot_linear(curves, nshots, out, fs):
                 label=lab, zorder=3)
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
-    ax.set_xlabel("threshold  [gauss]", color=INK2, fontsize=fs["axis"])
+    ax.set_xlabel("threshold amplitude  (arbitrary)", color=INK2, fontsize=fs["axis"])
     ax.set_ylabel("events detected  (shots with a crossing)", color=INK2,
                   fontsize=fs["axis"])
     ax.set_title(f"Event counts vs detection threshold  ({nshots} MAST-U shots)",
@@ -235,7 +235,7 @@ def main():
     ax2.axhline(0, color=GRID, lw=1.0, zorder=1)
     ax2.set_ylabel("local slope\nd log N / d log A", color=INK2,
                    fontsize=fs["axis"])
-    ax2.set_xlabel("threshold amplitude  [gauss]", color=INK2,
+    ax2.set_xlabel("threshold amplitude  (arbitrary)", color=INK2,
                    fontsize=fs["axis"], labelpad=8)
     ax2.text(0.0, 1.05, "flat = saturated; the break is where the threshold "
              "starts to discriminate",
