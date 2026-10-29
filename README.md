@@ -215,6 +215,15 @@ signal-to-floor level would vary by 1.88x in absolute terms. `--normalize-floor`
 restores the old behaviour for comparison, and the `floor` column is written
 either way.
 
+The floor is currently taken from the **gated** amplitude, which is
+inconsistent: before breakdown there is nothing coherent to keep, so at a high
+gate (e.g. 0.85) the whole t < 20 ms window is stripped and the floor is
+undefined. Such a trace is kept with `floor = NaN` (the gauss ladder never
+uses it), but under `--normalize-floor` that trace becomes all NaN and the
+shot can never cross. If normalisation is ever used, the floor should come from
+the **ungated** amplitude, which measures instrumental noise independent of the
+gate. Without normalisation the floor is informational only.
+
 The tesla reading is settled by plausibility: as stored, the noise floor is
 1.8e-07 and the largest excursion 3.0e-05. Taken as gauss, that floor would be
 0.018 nT — far below any real magnetic noise. Taken as tesla it is 1.8 mG with

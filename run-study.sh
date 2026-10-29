@@ -42,7 +42,7 @@ case $AMP_FORM in
 esac
 
 if [[ $# -lt 1 ]]; then
-  sed -n '2,20p' "$0" | sed 's/^# \?//'
+  sed -n '2,22p' "$0" | sed 's/^# \?//'
   exit 1
 fi
 
@@ -124,13 +124,19 @@ if [[ -z $threshold ]]; then
   fi
   echo "threshold from the knee: $threshold G"
 fi
-echo "THRESHOLD=$threshold" >> "$params"
+# the threshold is pinned like the other parameters: the features downstream
+# are harvested on this one annotation, so a folder holds one threshold only
+if grep -q "^THRESHOLD=" "$params"; then
+  check_param THRESHOLD "$threshold"
+else
+  echo "THRESHOLD=$threshold" >> "$params"
+fi
 
 # make_annotation appends _threshold<value> to the name it is given, so the
-# actual file is found afterwards; a plain joint.csv is a legacy folder
-found=$(ls "$folder"/joint_threshold*.csv 2>/dev/null | head -1 || true)
-if [[ -n $found ]]; then
-  joint=$found
+# file it wrote is recorded as JOINT; a plain joint.csv is a legacy folder
+have_joint=$(grep "^JOINT=" "$params" | head -1 | cut -d= -f2- || true)
+if [[ -n $have_joint && -f $have_joint ]]; then
+  joint=$have_joint
   echo "skipping: $joint already exists"
 elif [[ -f $joint ]]; then
   echo "skipping: $joint already exists (legacy name, no threshold in it)"
@@ -140,8 +146,9 @@ else
     | tee "$folder/annotation.txt"
   joint=$(grep -oE "wrote .*" "$folder/annotation.txt" | tail -1 | sed 's/^wrote //')
   [[ -f $joint ]] || { echo "ERROR: make_annotation output not found" >&2; exit 1; }
+  grep -v "^JOINT=" "$params" > "$params.tmp" && mv "$params.tmp" "$params"
+  echo "JOINT=$joint" >> "$params"
 fi
-echo "JOINT=$joint" >> "$params"
 
 # --- 4. equilibrium features, one store per tree --------------------------
 harvest () {                      # $1 = EPM | EPQ
