@@ -24,6 +24,7 @@ event-count figure (brmEventsCounter / blmEventsCounter).
 
 import argparse
 import os
+import os
 import numpy as np
 import pandas as pd
 
@@ -130,7 +131,12 @@ def plot_linear(curves, nshots, out, fs):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("csv", nargs="+")
+    p.add_argument("csv", nargs="+",
+                   help="one or more ladder CSVs. A single path containing "
+                        "{n} is expanded over --n-list")
+    p.add_argument("--n-list", type=int, nargs="+",
+                   help="|n| values to overlay. The csv path must contain {n}; "
+                        "labels default to |n|=1, |n|=2, ...")
     p.add_argument("--labels", nargs="+")
     p.add_argument("--out", default="ladder",
                    help="output prefix; a .png/.pdf/.csv extension is dropped")
@@ -142,6 +148,23 @@ def main():
                    help="how much steeper than the plateau counts "
                         "as the knee, in log-log slope units")
     a = p.parse_args()
+    # a single templated path plus --n-list expands to one curve per |n|
+    if a.n_list:
+        if len(a.csv) != 1 or "{n}" not in a.csv[0]:
+            raise SystemExit(
+                "--n-list needs exactly one csv path containing {n}, e.g.\n"
+                "  plot_ladder.py 'GATE-060/rm_ladder_g0.60_n{n}.csv' --n-list 1 2 3")
+        tmpl = a.csv[0]
+        paths, labs = [], []
+        for n in a.n_list:
+            f = tmpl.replace("{n}", str(n))
+            if not os.path.exists(f):
+                raise SystemExit(f"--n-list {n}: no such file {f}")
+            paths.append(f)
+            labs.append(f"|n| = {n}")
+        a.csv = paths
+        if not a.labels:
+            a.labels = labs
     labels = a.labels or [f.rsplit("/", 1)[-1].replace(".csv", "") for f in a.csv]
     root, ext = os.path.splitext(a.out)
     if ext.lower() in (".png", ".pdf", ".csv"):
