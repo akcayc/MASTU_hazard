@@ -18,7 +18,9 @@
 # Env:
 #   SHOT_MIN, SHOT_MAX   shot range            (default 47000 47100)
 #   WORKERS              extraction threads    (default 8)
-#   N_DETECT             toroidal mode number  (default 1)
+#   N_DETECT             |n| values to sweep   (default "1 2 3")
+#   PRIMARY_N            which |n| feeds the annotation and the
+#                        feature harvest (default: the first)
 #   PARALLEL_TAGS        true -> harvest EPM and EPQ concurrently
 #
 set -euo pipefail
@@ -53,7 +55,8 @@ threshold=${3:-}
 SHOT_MIN=${SHOT_MIN:-47000}
 SHOT_MAX=${SHOT_MAX:-47100}
 WORKERS=${WORKERS:-8}
-N_DETECT=${N_DETECT:-1}
+N_DETECT=${N_DETECT:-"1 2 3"}
+PRIMARY_N=${PRIMARY_N:-$(echo $N_DETECT | awk '{print $1}')}
 PARALLEL_TAGS=${PARALLEL_TAGS:-false}
 
 mkdir -p "$folder"
@@ -78,6 +81,7 @@ if [[ -f $params ]]; then
   check_param SHOT_MIN "$SHOT_MIN"
   check_param SHOT_MAX "$SHOT_MAX"
   check_param N_DETECT "$N_DETECT"
+  check_param PRIMARY_N "$PRIMARY_N"
   check_param AMP_FORM "$AMP_FORM"
   echo "parameters match $params"
 else
@@ -85,6 +89,7 @@ else
     echo "SHOT_MIN=$SHOT_MIN"
     echo "SHOT_MAX=$SHOT_MAX"
     echo "N_DETECT=$N_DETECT"
+    echo "PRIMARY_N=$PRIMARY_N"
     echo "AMP_FORM=$AMP_FORM"; } > "$params"
   echo "pinned parameters to $params"
 fi
@@ -92,31 +97,45 @@ fi
 echo "study folder : $folder"
 echo "shots        : $SHOT_MIN .. $((SHOT_MAX - 1))"
 echo "coherence    : $gate"
-echo "n_detect     : $N_DETECT"
+echo "|n| swept    : $N_DETECT   (primary: $PRIMARY_N)"
 echo "amp form     : $AMP_FORM"
 
-ladder="$folder/rm_ladder_g${gate}.csv"
 joint="$folder/joint.csv"
+ladder_of () { echo "$folder/rm_ladder_g${gate}_n$1.csv"; }
+ladder=$(ladder_of "$PRIMARY_N")        # the one that feeds the annotation
 
-# --- 1. detector: the threshold ladder ------------------------------------
-if [[ -f $ladder ]]; then
-  echo "skipping: $ladder already exists"
-else
-  echo "[1/5] detector"
-  python run_master.py --shots $(seq "$SHOT_MIN" $((SHOT_MAX - 1))) \
-    --build-detector --coherence-min "$gate" --n-detect "$N_DETECT" \
-    --amp-form "$AMP_FORM" --out-csv "$ladder"
-fi
+# --- 1. detector: one threshold ladder per |n| ----------------------------
+echo "[1/5] detector, |n| = $N_DETECT"
+for n in $N_DETECT; do
+  lad=$(ladder_of "$n")
+  if [[ -f $lad ]]; then
+    echo "  skipping: $lad already exists"
+  else
+    echo "  |n| = $n"
+    python run_master.py --shots $(seq "$SHOT_MIN" $((SHOT_MAX - 1))) \
+      --build-detector --coherence-min "$gate" --n-detect "$n" \
+      --amp-form "$AMP_FORM" --out-csv "$lad"
+  fi
+done
 
-# --- 2. base-rate curve and figures ---------------------------------------
+# --- 2. base rates and figures, all |n| side by side ----------------------
 echo "[2/5] base rate and figures"
-python ladder_base_rate.py "$ladder" | tee "$folder/base_rate.txt"
-python plot_ladder.py "$ladder" --labels "gate $gate" \
-  --out "$folder/ladder_$range" | tee "$folder/knee.txt"
+lads=""; labs=""
+for n in $N_DETECT; do
+  lads="$lads $(ladder_of "$n")"
+  labs="$labs |n|=$n"
+done
+python ladder_base_rate.py $lads --labels $labs | tee "$folder/base_rate.txt"
+python plot_ladder.py $lads --labels $labs \
+  --out "$folder/ladder_${range}_g${gate}" | tee "$folder/knee.txt"
+
+# the knee that feeds step 3 is the PRIMARY |n|'s, not whichever printed last
+python plot_ladder.py "$ladder" --labels "|n|=$PRIMARY_N" \
+  --out "$folder/ladder_${range}_g${gate}_n${PRIMARY_N}" > "$folder/knee_primary.txt"
 
 # --- 3. threshold -> survival table ---------------------------------------
 if [[ -z $threshold ]]; then
-  threshold=$(grep -oE "knee +[0-9.]+ G" "$folder/knee.txt" | head -1 \
+  threshold=$(grep -oE "knee +[0-9.]+ G" "$folder/knee_primary.txt" | head -1 \
               | grep -oE "[0-9.]+" || true)
   if [[ -z $threshold ]]; then
     echo "ERROR: no knee found; pass the threshold explicitly as argument 3" >&2
