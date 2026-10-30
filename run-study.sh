@@ -106,17 +106,23 @@ ladder=$(ladder_of "$PRIMARY_N")        # the one that feeds the annotation
 
 # --- 1. detector: one threshold ladder per |n| ----------------------------
 echo "[1/5] detector, |n| = $N_DETECT"
+# one run_master call for every |n| still missing: each shot is fetched and
+# transformed once, and one ladder is written per |n| through {n} in the path
+todo=""
 for n in $N_DETECT; do
   lad=$(ladder_of "$n")
   if [[ -f $lad ]]; then
     echo "  skipping: $lad already exists"
   else
-    echo "  |n| = $n"
-    python run_master.py --shots $(seq "$SHOT_MIN" $((SHOT_MAX - 1))) \
-      --build-detector --coherence-min "$gate" --n-detect "$n" \
-      --amp-form "$AMP_FORM" --out-csv "$lad"
+    todo="$todo $n"
   fi
 done
+if [[ -n $todo ]]; then
+  echo "  |n| =$todo"
+  python run_master.py --shots $(seq "$SHOT_MIN" $((SHOT_MAX - 1))) \
+    --build-detector --coherence-min "$gate" --n-detect $todo \
+    --amp-form "$AMP_FORM" --out-csv "$(ladder_of '{n}')"
+fi
 
 # --- 2. base rates and figures, all |n| side by side ----------------------
 echo "[2/5] base rate and figures"

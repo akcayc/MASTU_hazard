@@ -328,25 +328,33 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       coherence_min=0.0, ft_cfg=None, normalize_floor=False,
                       freq_step_max=None,
                       absolute_n=True, amp_form="centroid"):
-    """Run the detector over `shots` and return the ladder table."""
+    """Run the detector over `shots` and return one ladder table per n.
+
+    n_detect is one n or a list of them.  collect_signals analyses every n in
+    ntor_list anyway, so each shot is fetched and transformed once and every
+    requested n is laddered off the same traces.  Returns `tables`, keyed by n,
+    and `table`, the first n's, for single-n callers.
+    """
     ladder = DEFAULT_LADDER if ladder is None else np.asarray(ladder)
 
-    # The ladder triggers on one n, which must be among those analysed --
+    # Each ladder triggers on one n, which must be among those analysed --
     # otherwise every row comes back NaN and the cause is invisible.  Check
     # before touching the database, not per shot.  With absolute_n the sign is
     # immaterial: --n-detect 1 and --n-detect -1 both mean |n| = 1.
     ntor = [n for n in (ntor_list or NTOR_DEFAULT) if n != 0]
+    n_list = [int(n) for n in np.atleast_1d(n_detect)]
     if absolute_n:
         ntor = sorted({abs(int(n)) for n in ntor})
-        n_detect = abs(int(n_detect))
-    if int(n_detect) not in [int(n) for n in ntor]:
+        n_list = [abs(n) for n in n_list]
+    n_list = list(dict.fromkeys(n_list))          # drop repeats, keep order
+    missing = [n for n in n_list if n not in [int(m) for m in ntor]]
+    if missing:
         raise ValueError(
-            f"--n-detect {n_detect} is not in --n-tor {sorted(int(n) for n in ntor)}. "
-            f"The ladder triggers on one toroidal mode number, which must be one "
-            f"of those analysed. Add {n_detect} to --n-tor, or pick a different "
-            f"--n-detect.")
+            f"--n-detect {missing} not in --n-tor {sorted(int(n) for n in ntor)}. "
+            f"Each ladder triggers on one toroidal mode number, which must be one "
+            f"of those analysed. Add it to --n-tor, or drop it from --n-detect.")
 
-    rows, dropped = [], {}
+    rows, dropped = {n: [] for n in n_list}, {}
 
     for shot in shots:
         sig = collect_signals(shot, client, t_start=t_start, ntor_list=ntor_list,
@@ -357,19 +365,32 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
             dropped[shot] = sig["reason"]
             print(f"{shot}: dropped -- {sig['reason']}")
             continue
-        row = {"shot": shot, "isok_rm": 1, "whichn": n_detect,
-               "ta_rm": sig["tsof"], "tb_rm": sig["teof"],
-               "ip_mean": sig["ip_mean"], "ft_nrmse": sig["ft_nrmse"],
-               "floor": sig["traces"][int(n_detect)]["floor"],
-               "truncated": int(sig["truncated"]),
-               "lost_exposure": sig["lost_exposure"]}
-        row.update(detect_ladder(sig, ladder, n_detect, debounce,
-                                 freq_step_max))
-        rows.append(row)
+        for n in n_list:
+            row = {"shot": shot, "isok_rm": 1, "whichn": n,
+                   "ta_rm": sig["tsof"], "tb_rm": sig["teof"],
+                   "ip_mean": sig["ip_mean"], "ft_nrmse": sig["ft_nrmse"],
+                   "floor": sig["traces"][n]["floor"],
+                   "truncated": int(sig["truncated"]),
+                   "lost_exposure": sig["lost_exposure"]}
+            row.update(detect_ladder(sig, ladder, n, debounce,
+                                     freq_step_max))
+            rows[n].append(row)
         print(f"{shot}: ok  window [{sig['tsof']:.4f}, {sig['teof']:.4f}] s")
 
-    df = pd.DataFrame(rows)
-    return {"table": df, "dropped": dropped, "ladder": ladder}
+    tables = {n: pd.DataFrame(r) for n, r in rows.items()}
+    return {"tables": tables, "table": tables[n_list[0]],
+            "dropped": dropped, "ladder": ladder}
+
+
+def ladder_paths(out_csv, n_list):
+    """{n: path} for the ladder CSVs.  `{n}` in out_csv is replaced by each n;
+    with several n it is required, so one file cannot silently overwrite
+    another."""
+    if len(n_list) > 1 and "{n}" not in out_csv:
+        raise ValueError(
+            f"--out-csv {out_csv!r} must contain {{n}} when --n-detect has "
+            f"several values, e.g. rm_ladder_g0.60_n{{n}}.csv")
+    return {n: out_csv.replace("{n}", str(n)) for n in n_list}
 
 
 def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
@@ -377,6 +398,12 @@ def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                debounce=0.008, n_detect=1, normalize_floor=False,
                ladder_spec=None, absolute_n=True, amp_form="centroid",
                freq_step_max=None):
+    n_list = [int(n) for n in np.atleast_1d(n_detect)]
+    if absolute_n:
+        n_list = [abs(n) for n in n_list]
+    n_list = list(dict.fromkeys(n_list))
+    paths = ladder_paths(out_csv, n_list) if out_csv else {}   # fail before any fetch
+
     client = pyuda.Client()
     outputs = {}
 
@@ -389,15 +416,15 @@ def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
             ladder = np.logspace(np.log10(lo), np.log10(hi), num)
         det = build_rm_detector(shots=shots, client=client, ladder=ladder,
                                 ntor_list=ntor_list, NFFT=NFFT, t_start=t_start,
-                                n_detect=n_detect, debounce=debounce,
+                                n_detect=n_list, debounce=debounce,
                                 coherence_min=coherence_min,
                                 normalize_floor=normalize_floor,
                                 absolute_n=absolute_n, amp_form=amp_form,
                                 freq_step_max=freq_step_max)
         outputs["detector"] = det
-        if out_csv:
-            det["table"].to_csv(out_csv, index=False)
-            print(f"\nwrote {len(det['table'])} rows -> {out_csv}"
+        for n, path in paths.items():
+            det["tables"][n].to_csv(path, index=False)
+            print(f"\nwrote {len(det['tables'][n])} rows, n={n} -> {path}"
                   f"  ({len(det['dropped'])} shots dropped)")
 
     return outputs
@@ -412,9 +439,10 @@ def main():
     parser.add_argument("--nfft", type=int, default=512)
     parser.add_argument("--n-tor", type=int, nargs="+", default=NTOR_DEFAULT,
                         help="toroidal mode numbers to search; both signs")
-    parser.add_argument("--n-detect", type=int, default=1,
-                        help="toroidal mode number the ladder triggers on "
-                             "(|n| unless --signed-n)")
+    parser.add_argument("--n-detect", type=int, nargs="+", default=[1],
+                        help="toroidal mode number(s) to ladder, one CSV each "
+                             "(|n| unless --signed-n); each shot is analysed "
+                             "once for all of them")
     parser.add_argument("--amp-form", choices=["centroid", "perbin"],
                         default="centroid",
                         help="amplitude estimator: Giovannozzi's band-total / "
@@ -428,7 +456,9 @@ def main():
     parser.add_argument("--coherence-min", type=float, default=0.0,
                         help="zero frequency bins whose toroidal-fit coherence is "
                              "below this, before the amplitude sum")
-    parser.add_argument("--out-csv", type=str, default=None)
+    parser.add_argument("--out-csv", type=str, default=None,
+                        help="ladder CSV path; must contain {n} when "
+                             "--n-detect has several values")
     parser.add_argument("--freq-step-max", type=float, default=None,
                         help="OFF by default. Reject a slice whose Fa jumped "
                              "more than this many Hz from the previous one. "
