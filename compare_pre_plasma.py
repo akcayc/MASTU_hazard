@@ -25,6 +25,7 @@ shot-varying and drifting is MHD.
 """
 
 import argparse
+import time
 
 import numpy as np
 
@@ -32,8 +33,10 @@ import giopath  # noqa: F401
 
 try:
     import pyuda
-    from saddle_extras import analyze_shot
-    from saddle_analysis import NTOR_DEFAULT
+    from saddle_data import load_omaha_slow, AmplitudeSelector
+    from saddle_extras import amplitude_with_coherence, amplitude_diiid
+    from saddle_analysis import (NTOR_DEFAULT, TIME_INTERVAL_DEFAULT,
+                                 FMIN_DEFAULT, FMAX_DEFAULT)
     from flattop import find_flattop, FlatTopConfig
 except ImportError:
     giopath.report()
@@ -81,9 +84,10 @@ def main():
     p.add_argument("--t1", type=float, help="fixed flat-top end")
     p.add_argument("--amp-form", choices=["centroid", "perbin"],
                    default="centroid")
+    p.add_argument("--report-every", type=int, default=100,
+                   help="progress line every N shots; 0 to silence")
     a = p.parse_args()
     shots = a.shots or list(range(a.shot_min, a.shot_max))
-    key = "amp_perbin" if a.amp_form == "perbin" else "amp_centroid"
 
     client = pyuda.Client()
     # rows[gate] = (pre amplitudes, flat amplitudes, pre freqs, flat freqs,
@@ -91,18 +95,35 @@ def main():
     acc = {g: ([], [], [], [], 0, 0) for g in a.gates}
     nshot, win_kind = 0, None
 
-    for shot in shots:
+    # The load, the spectrogram and n_detection do NOT depend on the gate --
+    # only the masking inside the amplitude does.  Doing them once per shot
+    # rather than once per shot per gate is an 8x saving at eight gates, which
+    # is the difference between an hour and most of a day on 2800 shots.
+    nabs = abs(a.n_detect)
+    ti = TIME_INTERVAL_DEFAULT
+    mags = sorted({abs(int(n)) for n in NTOR_DEFAULT if int(n) != 0})
+    search = np.asarray([0] + [sg * m for m in mags for sg in (-1, 1)])
+    sel = AmplitudeSelector(ntor=nabs, time=ti,
+                            f_min=np.array([FMIN_DEFAULT] * len(ti)),
+                            f_max=np.array([FMAX_DEFAULT] * len(ti)), v_min=0.0)
+    t0_run = time.time()
+
+    for i, shot in enumerate(shots):
         try:
             ta, tb, win_kind = flattop_window(shot, client, a.t0, a.t1)
+            sd = load_omaha_slow(shot)
+            if sd.time.size < 2:
+                raise RuntimeError("no OMAHA data")
+            rm = sd.spectrum(a.nfft).n_detection(search)
             for g in a.gates:
-                per_n, _ = analyze_shot(shot, NFFT=a.nfft, ntor=NTOR_DEFAULT,
-                                        coh_min=g)
-                m = per_n.get(abs(a.n_detect))
-                if m is None:
-                    continue
-                t = np.asarray(m["time"], float)
-                amp = np.asarray(m[key], float) * GAUSS_PER_TESLA
-                frq = np.asarray(m["freq"], float)
+                if a.amp_form == "perbin":
+                    t, amp_r = amplitude_diiid(rm, sel, g, True)
+                    _, frq, _, _, _ = amplitude_with_coherence(rm, sel, g, True)
+                else:
+                    t, frq, _, amp_r, _ = amplitude_with_coherence(rm, sel, g, True)
+                t = np.asarray(t, float)
+                amp = np.asarray(amp_r, float) * GAUSS_PER_TESLA
+                frq = np.asarray(frq, float)
                 pre = t < a.t_pre
                 flat = (t >= ta) & (t <= tb)
                 P, F, PF, FF, surv, tot = acc[g]
@@ -112,6 +133,11 @@ def main():
                           surv + int(np.isfinite(amp[pre]).sum()),
                           tot + int(pre.sum()))
             nshot += 1
+            if a.report_every and (i + 1) % a.report_every == 0:
+                el = time.time() - t0_run
+                rate = (i + 1) / el
+                print(f"    {i+1}/{len(shots)}  {rate:.1f} shot/s  "
+                      f"ETA {(len(shots)-i-1)/max(rate,1e-9)/60:.0f} min")
         except Exception as e:
             print(f"  skip {shot}: {type(e).__name__}: {e}")
 
