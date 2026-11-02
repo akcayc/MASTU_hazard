@@ -107,44 +107,63 @@ def report(title, j, na, nb, n_b_events, dt_win):
           f"({100*m/max(n_b_events, 1):.1f}% of |n|={nb} events)")
 
 
-def plot(jk, jl, labs, na, nb, out):
+def plot(jk, jl, labs, na, nb, out, dt_win):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    # one panel per comparison: every shot thin, the shots whose crossings
+    # fall within dt_win bold.  Only those compare Fa at about one time.
+    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.6), sharex=True)
     fig.patch.set_facecolor(SURFACE)
-    ax.set_facecolor(SURFACE)
-    bins = np.logspace(np.log10(1 / 3), np.log10(6.0), 37)
-    for j, lab, c in ((jk, labs[0], SERIES[0]), (jl, labs[1], SERIES[1])):
+    lo, hi = 1 / 3, 6.0
+    bins = np.logspace(np.log10(lo), np.log10(hi), 37)
+    for ax, j, lab, c in zip(axes, (jk, jl), labs, SERIES):
+        ax.set_facecolor(SURFACE)
         r = j["ratio"].to_numpy(float)
-        r = r[np.isfinite(r) & (r > 0)]
-        if r.size:
-            ax.hist(np.clip(r, bins[0], bins[-1]), bins=bins, histtype="step",
-                    lw=2.2, color=c, label=f"{lab}  ({r.size} shots)")
-    for x, t in ((1.0, "leak  (same Fa)"),
-                 (nb / na, f"genuine n={nb}  ({nb / na:g}x Fa)")):
-        ax.axvline(x, color=INK3, lw=1.0, ls=(0, (4, 3)), zorder=0)
-        ax.text(x * 1.03, 0.97, t, transform=ax.get_xaxis_transform(),
-                color=INK3, rotation=90, ha="left", va="top", fontsize=10)
-    ax.set_xscale("log")
-    ax.set_xlim(bins[0], bins[-1])
-    ticks = [0.5, 1, 2, 3, 4, 5]
-    ax.xaxis.set_major_locator(matplotlib.ticker.FixedLocator(ticks))
-    ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
-    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
-    ax.set_xlabel(f"Fa(|n|={nb}) / Fa(|n|={na}) at the crossings", color=INK2)
-    ax.set_ylabel("shots", color=INK2)
-    ax.grid(True, color=GRID, lw=0.8, zorder=0)
-    for sp in ("top", "right"):
-        ax.spines[sp].set_visible(False)
-    for sp in ("left", "bottom"):
-        ax.spines[sp].set_color(GRID)
-    ax.tick_params(colors=INK2, which="both")
-    # above the axes, so it never sits on a peak or a reference line
-    ax.legend(frameon=False, labelcolor=INK2, loc="lower left",
-              bbox_to_anchor=(0.0, 1.01), ncol=2, borderaxespad=0)
-    ax.set_title("Frequency ratio at the crossings", color=INK, fontsize=13,
-                 fontweight="semibold", loc="left", pad=30)
+        near = (np.abs(j["dt"].to_numpy(float)) <= dt_win)
+        ok = np.isfinite(r) & (r > 0)
+        r, near = r[ok], near[ok]
+        # out-of-range ratios are counted at the edges, not piled into the
+        # end bins where they would read as a peak
+        for sel, lw, alpha, txt in (
+                (np.ones_like(near), 1.2, 0.55, f"all  ({near.size})"),
+                (near, 2.4, 1.0, f"|dt| <= {1e3*dt_win:g} ms  ({int(near.sum())})")):
+            rs = r[sel]
+            ax.hist(rs[(rs >= lo) & (rs <= hi)], bins=bins, histtype="step",
+                    lw=lw, color=c, alpha=alpha, label=txt)
+        for x, side, cnt in ((lo, "left", (r < lo, (r < lo) & near)),
+                             (hi, "right", (r > hi, (r > hi) & near))):
+            ax.text(0.01 if side == "left" else 0.99, 0.80,
+                    f"{'<' if side == 'left' else '>'} {x:.2g}:\n"
+                    f"{int(cnt[0].sum())} all\n{int(cnt[1].sum())} near",
+                    transform=ax.transAxes, ha=side, va="top",
+                    color=INK2, fontsize=9)
+        for x, t in ((1.0, "leak  (same Fa)"),
+                     (nb / na, f"genuine n={nb}  ({nb / na:g}x Fa)")):
+            ax.axvline(x, color=INK3, lw=1.0, ls=(0, (4, 3)), zorder=0)
+            ax.text(x * 1.03, 0.97, t, transform=ax.get_xaxis_transform(),
+                    color=INK3, rotation=90, ha="left", va="top", fontsize=10)
+        ax.set_xscale("log")
+        ax.set_xlim(lo, hi)
+        ax.xaxis.set_major_locator(matplotlib.ticker.FixedLocator([0.5, 1, 2, 3, 4, 5]))
+        ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+        ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
+        ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        ax.set_xlabel(f"Fa(|n|={nb}) / Fa(|n|={na})", color=INK2)
+        ax.grid(True, color=GRID, lw=0.8, zorder=0)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        for sp in ("left", "bottom"):
+            ax.spines[sp].set_color(GRID)
+        ax.tick_params(colors=INK2, which="both")
+        # above the axes, so it never sits on a peak or a reference line
+        ax.legend(frameon=False, labelcolor=INK2, loc="lower left",
+                  bbox_to_anchor=(0.0, 1.01), ncol=2, borderaxespad=0)
+        ax.set_title(lab, color=INK, fontsize=12, loc="left", pad=24)
+    axes[0].set_ylabel("shots", color=INK2)
+    fig.suptitle("Frequency ratio at the crossings", color=INK, fontsize=13,
+                 fontweight="semibold", x=0.07, ha="left")
+    fig.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(f"{out}.{ext}", dpi=170, facecolor=SURFACE, bbox_inches="tight")
 
@@ -243,7 +262,7 @@ def main():
         written = [f"{a.out}.csv"]
         if a.plot:
             plot(jk, jl, [f"at the |n|={na} knee", f"at the |n|={nb} threshold"],
-                 na, nb, a.out)
+                 na, nb, a.out, a.dt_window)
             written += [f"{a.out}.png", f"{a.out}.pdf"]
         print(f"\n  wrote {'  '.join(written)}")
     return 0

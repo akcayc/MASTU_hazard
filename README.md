@@ -475,6 +475,11 @@ candidates closest in time, to confirm with `plot_mode_track.py --n-list 1 2`.
 Ladders hold first crossings only, and Fa is a band centroid, so this screens;
 it does not prove.
 
+`--plot` draws one panel per comparison: every shot thin, and the shots whose
+crossings fall within `--dt-window` bold. Only the bold ones compare Fa at about
+one time. Ratios outside 1/3..6 are counted at the panel edges, not piled into
+the end bins.
+
 ## Optional: Fa continuity in the trigger
 
 `--freq-step-max <Hz>` rejects a slice whose Fa jumped more than that from the
