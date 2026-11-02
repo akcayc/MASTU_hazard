@@ -243,17 +243,22 @@ def main():
                          annotation_clip=False)
     ax1.set_ylabel("events  (shots with a crossing)", color=INK2,
                    fontsize=fs["axis"])
-    fig.text(0.125, 0.958, "Tearing-mode events vs threshold amplitude",
+    # "detected", not "tearing-mode": no crossing has yet been checked
+    # against a known mode (the truth set)
+    fig.text(0.125, 0.958, "Detected events vs threshold amplitude",
              color=INK, fontsize=fs["title"], fontweight="semibold", ha="left")
-    fig.text(0.125, 0.922, f"n=1 OMAHA ladder, {nshots} MAST-U shots - "
-             f"dashed lines mark the plateau departure",
+    series = f" ({', '.join(labels)})" if direct else ""
+    fig.text(0.125, 0.922, f"OMAHA ladders{series}, {nshots} MAST-U shots - "
+             f"dashed lines mark the knee",
              color=INK3, fontsize=fs["subtitle"], ha="left")
-    leg = ax1.legend(frameon=False, loc="lower left", fontsize=fs["legend"],
-                     labelcolor=INK2, handletextpad=0.7,
-                     bbox_to_anchor=(0.015, 0.04),
-                     ncol=1 if len(a.csv) <= 4 else 2,
-                     columnspacing=1.6)
-    leg.set_zorder(5)
+    # the curve ends carry the names when there are few; a legend as well
+    # would say it twice and sits on the low curves
+    if not direct:
+        # in the right margin the curve-end labels would use, clear of the data
+        leg = ax1.legend(frameon=False, loc="upper left", fontsize=fs["legend"],
+                         labelcolor=INK2, handletextpad=0.7,
+                         bbox_to_anchor=(1.02, 1.0), ncol=1)
+        leg.set_zorder(5)
 
     ax2.axhline(0, color=GRID, lw=1.0, zorder=1)
     ax2.set_ylabel("local slope\nd log N / d log A", color=INK2,
@@ -273,11 +278,17 @@ def main():
         for sp in ("left", "bottom"):
             ax.spines[sp].set_color(GRID)
         ax.tick_params(colors=INK2, labelsize=fs["tick"], which="both")
-    ax2.xaxis.set_major_formatter(matplotlib.ticker.LogFormatterSciNotation())
+    # one plain-decimal format for every tick label, major and minor
+    ax2.xaxis.set_major_formatter(
+        matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
     ax2.xaxis.set_minor_formatter(
         matplotlib.ticker.FuncFormatter(
             lambda v, _: f"{v:g}" if v in (0.002, 0.005, 0.02, 0.05, 0.2) else ""))
-    ax2.tick_params(axis="x", which="minor", labelsize=fs["minor"], colors=INK3)
+    # minor ticks are shorter, so pad their labels onto the major baseline
+    maj = matplotlib.rcParams["xtick.major.size"]
+    mnr = matplotlib.rcParams["xtick.minor.size"]
+    ax2.tick_params(axis="x", which="minor", labelsize=fs["tick"], colors=INK2,
+                    pad=matplotlib.rcParams["xtick.major.pad"] + maj - mnr)
 
     for ext in ("png", "pdf"):
         fig.savefig(f"{a.out}.{ext}", dpi=170, facecolor=SURFACE,
