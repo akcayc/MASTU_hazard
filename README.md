@@ -35,6 +35,7 @@ recomputation over the database.
 | `ladder_base_rate.py` | Ladder CSV -> events, dwell and base hazard per level |
 | `plot_ladder.py` | Figures: events vs threshold, and the local slope that locates the knee |
 | `plot_mode_track.py` | One shot: gated spectrogram per \|n\| overlaid, with Fa tracks |
+| `check_n_leakage.py` | Two ladders, e.g. \|n\|=1 and 2: does the \|n\|=2 crossing sit at the \|n\|=1 Fa (leak) or twice it? |
 | `make_annotation.py` | Ladder CSV + a threshold -> the 7-column survival table |
 | `merge_pair.py` | EPQ onto EPM's time base, then flatten to the survival table |
 | `compare_trees.py` | Does EPQ use more constraints than EPM? |
@@ -454,6 +455,25 @@ frequency-drop detector, and a screening column for the survival table.
 Everything that reads a ladder filters on `rm*`, so the new columns disturb
 nothing, and a ladder written before them still works — `make_annotation` says
 so and leaves the two fields empty.
+
+### Using Fa to test n=1 -> n=2 leakage
+
+On the ~60 deg array a pure n=1 projects onto n=2 with coherence 0.866, so a
+noisy bin can go to the wrong n. Raising the gate does not isolate this: the
+argmax comes before the gate. Fa does. Under rigid rotation f ~ n f_rot, so a
+genuine n=2 sits at about twice the n=1 frequency, while leaked n=1 power keeps
+the n=1 frequency and crosses at the same time.
+
+    python check_n_leakage.py 'GATE-080/rm_ladder_g0.8_n{n}.csv' --n-pair 1 2 \
+        --out GATE-080/leak --plot
+
+It joins the two ladders by shot at each one's knee (or `--thresholds`), and
+again with \|n\|=1 read at the \|n\|=2 level, since leaked power is a fraction of
+the n=1 amplitude. A leak candidate has a ratio within `--ratio-tol` of 1 and
+crossings within `--dt-window`. It prints the ratio classes, the timing, and the
+candidates closest in time, to confirm with `plot_mode_track.py --n-list 1 2`.
+Ladders hold first crossings only, and Fa is a band centroid, so this screens;
+it does not prove.
 
 ## Optional: Fa continuity in the trigger
 
