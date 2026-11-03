@@ -157,6 +157,20 @@ def harmonic_inputs(rm, sp, sels, coh_min, orders):
     return out
 
 
+def phase_lock(z1, zh, b):
+    """|sum zh conj(z1)^b| / sum |zh| |z1|^b over the finite pairs: the
+    bicoherence of an order-b overtone.  ~1 locked, ~1/sqrt(N_eff) unlocked.
+
+    NaN unless at least half the slices (and 3) give a pair: a few random
+    phases average to a high value, so a sparse window would read as locked.
+    """
+    m = np.isfinite(z1) & np.isfinite(zh)
+    if m.sum() < max(3, z1.size / 2):
+        return np.nan
+    den = np.sum(np.abs(zh[m]) * np.abs(z1[m]) ** b)
+    return float(np.abs(np.sum(zh[m] * np.conj(z1[m]) ** b)) / den) if den > 0 else np.nan
+
+
 def _select_bins(rm, sel: AmplitudeSelector, coh_min, absolute_n):
     """The (time, freq) bins that count toward sel.ntor, and their coherence.
 

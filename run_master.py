@@ -39,7 +39,7 @@ try:
     import pyuda
 
     from saddle_analysis import NTOR_DEFAULT
-    from saddle_extras import analyze_shot, noise_floor
+    from saddle_extras import analyze_shot, noise_floor, phase_lock
     from flattop import find_flattop, FlatTopConfig
 except ImportError:
     giopath.report()
@@ -303,7 +303,7 @@ def harmonic_stats(t, tr, tr1, b, tc, half_window):
             ~ 1/sqrt(N_eff); z_h is n=b at bin b*k_1, so this is the
             bicoherence and the bin width does not limit it
 
-    NaN where fewer than 3 slices qualify.
+    NaN where fewer than 3 slices qualify; hp also needs half the window.
     """
     w = np.abs(t - tc) <= half_window
     k1, kb = tr1["pk_bin"][w], tr["pk_bin"][w]
@@ -313,14 +313,7 @@ def harmonic_stats(t, tr, tr1, b, tc, half_window):
     m = np.isfinite(a1) & np.isfinite(ab) & (a1 > 0) & (ab > 0)
     ha = (float(np.corrcoef(np.log(ab[m]), np.log(a1[m]))[0, 1])
           if m.sum() >= 3 else np.nan)
-    z1, zh = tr1["z_pk"][w], tr["z_h"][w]
-    m = np.isfinite(z1) & np.isfinite(zh)
-    if m.sum() >= 3:
-        num = np.abs(np.sum(zh[m] * np.conj(z1[m]) ** b))
-        den = np.sum(np.abs(zh[m]) * np.abs(z1[m]) ** b)
-        hp = float(num / den) if den > 0 else np.nan
-    else:
-        hp = np.nan
+    hp = phase_lock(tr1["z_pk"][w], tr["z_h"][w], b)
     return hf, ha, hp
 
 

@@ -503,6 +503,21 @@ inside one bin, and two smooth envelopes over 40 ms correlate regardless
 level's values as `hf_event`, `ha_event`, `hp_event`. Needs \|n\|=1 in
 `--n-tor` and is refused with `--signed-n`.
 
+`hp` is NaN unless at least half the window's slices give a pair: a few
+random phases average high, so a sparse window would otherwise read as locked.
+
+To see why one shot scores what it does, plot the phase per slice:
+
+    python plot_mode_track.py --shot 51574 --coherence-min 0.8 --n-list 1 2 \
+        --phase-lock --t0 0.1854
+
+Panel 4 is psi_b = arg(z_b conj(z_1)^b) per slice, darker where the slice
+weighs more in `hp`: a flat run is a locked overtone, scatter is no lock.
+Panel 5 is `hp` in a sliding `--harmonic-window`, with the noise level
+1/sqrt(N_eff) dashed; `--t0` marks the crossing, and the script prints `hp`
+there. Read plateaus: where an episode starts or ends the window is half
+filled and `hp` can spike.
+
 ## Optional: Fa continuity in the trigger
 
 `--freq-step-max <Hz>` rejects a slice whose Fa jumped more than that from the

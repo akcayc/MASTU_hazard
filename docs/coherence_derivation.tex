@@ -1,0 +1,164 @@
+\documentclass[11pt]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,array}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\setlength{\parskip}{0.5em}\setlength{\parindent}{0pt}
+\title{Toroidal-fit coherence on the OMAHA array:\\derivation and the $n$ table}
+\author{MASTU\_hazard notes}
+\date{}
+\begin{document}
+\maketitle
+
+\section{Definition (as coded)}
+For one frequency bin $f$ and one time slice $t$, let $S_c$ be the complex
+spectrum of coil $c$ (\texttt{specgram(\ldots, mode='complex')}),
+$c=1,\dots,N_c$, with $N_c=5$ OMAHA slow coils at toroidal angles
+\[
+\varphi_c = [\,36.8,\;26.5,\;4.0,\;-5.0,\;-23.0\,]^\circ .
+\]
+\texttt{Spectra.n\_detection} (\texttt{egio/saddle\_data.py}) forms, for each searched $n$,
+\[
+Z_n = \sum_{c=1}^{N_c} e^{\,i n\varphi_c}\, S_c ,
+\qquad
+\texttt{power} = \frac{1}{N_c}\sum_c |S_c|^2 ,
+\qquad
+\texttt{coherence}_n = \frac{|Z_n|^2}{N_c^2\;\texttt{power}} .
+\]
+Substituting \texttt{power}:
+\[
+\boxed{\;\mathrm{coh}_n = \frac{\bigl|\sum_c e^{\,i n\varphi_c} S_c\bigr|^2}{N_c \sum_c |S_c|^2}\;}
+\]
+The bin is assigned to $n^\ast = \arg\max_n |Z_n|$ over the searched list
+$\{0,\pm1,\dots,\pm4\}$ (equivalently the largest $\mathrm{coh}_n$, since the
+denominator does not depend on $n$). The coherence gate then keeps the bin
+only if $\mathrm{coh}_{n^\ast}\ge$ \texttt{coh\_min}.
+\textbf{The argmax comes before the gate.}
+
+\section{Bounds: why a real mode scores 1}
+By Cauchy--Schwarz, with $a_c = e^{in\varphi_c}$ and $|a_c|=1$,
+\[
+\Bigl|\sum_c a_c S_c\Bigr|^2 \le \Bigl(\sum_c |a_c|^2\Bigr)\Bigl(\sum_c |S_c|^2\Bigr) = N_c\sum_c|S_c|^2
+\quad\Rightarrow\quad 0\le \mathrm{coh}_n\le 1 ,
+\]
+with equality iff $S_c = \lambda\,\overline{a_c} = \lambda\, e^{-in\varphi_c}$
+for one complex $\lambda$ common to all coils.
+
+A rotating mode $B_c(t)=A\cos(\omega t - m\varphi_c + \alpha)$ has, in its
+positive-frequency bin, $S_c \propto \tfrac{A}{2}\,e^{i\alpha}\,e^{-im\varphi_c}$
+(identical gain, area and window on every coil assumed). That is exactly the
+equality case for $n=m$: \textbf{a clean mode scores $\mathrm{coh}_m = 1$ at
+its own $n$.}
+
+\section{A pure mode scored at another $n$: the array factor}
+Put $S_c = \lambda e^{-im\varphi_c}$ into the boxed formula and score it at $n$:
+\[
+\mathrm{coh}_n
+= \frac{|\lambda|^2\,\bigl|\sum_c e^{\,i(n-m)\varphi_c}\bigr|^2}{N_c\cdot N_c|\lambda|^2}
+= \frac{\bigl|\sum_c e^{\,ik\varphi_c}\bigr|^2}{N_c^2},
+\qquad k = n-m .
+\]
+It depends only on the difference $k=n-m$, not on $n$ or $m$ separately, and
+$|{\textstyle\sum} e^{-ik\varphi_c}| = |{\textstyle\sum} e^{ik\varphi_c}|$, so it
+is even in $k$. The common mode is the case $m=0$: a signal every coil sees
+identically scores $\mathrm{coh}_n = |\sum_c e^{in\varphi_c}|^2/25$.
+
+\subsection*{Worked numbers}
+Per-coil terms $\cos k\varphi_c$, $\sin k\varphi_c$:
+
+\begin{center}\small
+\begin{tabular}{c r *{4}{r r}}
+\toprule
+coil & $\varphi_c$ [deg] & \multicolumn{2}{c}{$k=1$} & \multicolumn{2}{c}{$k=2$} & \multicolumn{2}{c}{$k=3$} & \multicolumn{2}{c}{$k=4$}\\
+ & & cos & sin & cos & sin & cos & sin & cos & sin\\
+\midrule
+1 & +36.8 & +0.8007 & +0.5990 & +0.2823 & +0.9593 & -0.3486 & +0.9373 & -0.8406 & +0.5417 \\
+2 & +26.5 & +0.8949 & +0.4462 & +0.6018 & +0.7986 & +0.1822 & +0.9833 & -0.2756 & +0.9613 \\
+3 & +4.0 & +0.9976 & +0.0698 & +0.9903 & +0.1392 & +0.9781 & +0.2079 & +0.9613 & +0.2756 \\
+4 & -5.0 & +0.9962 & -0.0872 & +0.9848 & -0.1736 & +0.9659 & -0.2588 & +0.9397 & -0.3420 \\
+5 & -23.0 & +0.9205 & -0.3907 & +0.6947 & -0.7193 & +0.3584 & -0.9336 & -0.0349 & -0.9994 \\
+\midrule $\Sigma$ & & +4.6099 & +0.6371 & +3.5539 & +1.0041 & +2.1361 & +0.9360 & +0.7499 & +0.4372 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Then $\mathrm{coh} = (\Sigma\cos^2 + \Sigma\sin^2)/25$. For example, $k=1$:
+$(4.6099^2 + 0.6371^2)/25 = (21.251 + 0.406)/25 = 21.657/25 = 0.866$.
+
+\begin{center}
+\begin{tabular}{c r r r r}
+\toprule
+$|k|=|n-m|$ & $\sum\cos k\varphi_c$ & $\sum\sin k\varphi_c$ & $|\sum e^{ik\varphi_c}|^2$ & $\mathrm{coh}$ \\
+\midrule
+0 & +5.0000 & +0.0000 & 25.000 & 1.000 \\
+1 & +4.6099 & +0.6371 & 21.657 & 0.866 \\
+2 & +3.5539 & +1.0041 & 13.638 & 0.546 \\
+3 & +2.1361 & +0.9360 & 5.439 & 0.218 \\
+4 & +0.7499 & +0.4372 & 0.753 & 0.030 \\
+5 & -0.2498 & -0.3194 & 0.164 & 0.007 \\
+6 & -0.6541 & -1.0574 & 1.546 & 0.062 \\
+\bottomrule
+\end{tabular}
+\end{center}
+(For $k<0$ the sine column changes sign; $\mathrm{coh}$ is unchanged.)
+
+\textbf{Why it falls so slowly.} The five coils span only
+$36.8-(-23.0)=59.8^\circ$ of the torus. Across that aperture $e^{ik\varphi}$
+turns by $k\times 59.8^\circ$; it takes $k\approx 360/59.8\approx 6$ for a
+full turn and a cancellation. So neighbouring $n$ are barely distinguished:
+the first near-null is at $|k|=5$ (0.007), and $|k|=1$ still scores 0.866.
+
+\section{The table by mode}
+Each row: a pure mode of toroidal number $m$, scored at every searched $n$.
+The diagonal (bold) is the mode's own $n$; the argmax picks it when there is
+no noise.
+
+\begin{center}\small
+\begin{tabular}{c *{9}{c}}
+\toprule
+ & \multicolumn{9}{c}{scored at $n$}\\
+mode $m$ & 0 & $+1$ & $-1$ & $+2$ & $-2$ & $+3$ & $-3$ & $+4$ & $-4$\\
+\midrule
+$0$ & \textbf{1.000} & 0.866 & 0.866 & 0.546 & 0.546 & 0.218 & 0.218 & 0.030 & 0.030 \\
+$+1$ & 0.866 & \textbf{1.000} & 0.546 & 0.866 & 0.218 & 0.546 & 0.030 & 0.218 & 0.007 \\
+$+2$ & 0.546 & 0.866 & 0.218 & \textbf{1.000} & 0.030 & 0.866 & 0.007 & 0.546 & 0.062 \\
+$+3$ & 0.218 & 0.546 & 0.030 & 0.866 & 0.007 & \textbf{1.000} & 0.062 & 0.866 & 0.098 \\
+\bottomrule
+\end{tabular}
+\end{center}
+A negative $m$ (opposite rotation) is the same row with $n\to -n$.
+With \texttt{absolute\_n} the $|n|$ trace pools bins assigned to $+|n|$ and $-|n|$.
+
+\section{What follows}
+\begin{enumerate}
+\item \textbf{Aliasing between neighbours.} A pure $n=1$ scores 0.866 at
+  $n=2$ and at $n=0$; a pure $n=2$ scores 0.866 at $n=1$ and $n=3$. The
+  genuine $n$ wins the argmax by a margin of only $1-0.866=0.134$.
+\item \textbf{The gate cannot remove a flipped bin.} Noise can push a bin's
+  argmax to the neighbour. The coherence that bin then carries is about
+  0.866, above a 0.8 gate, so it passes. Raising the gate above 0.866 rejects
+  pure aliases but also starts rejecting genuine modes that noise has pulled
+  below 1. This is why leakage is tested on frequency (Section~6), not by
+  the gate.
+\item \textbf{A genuine $n=2$ passes a 0.8 gate.} It scores 1 at $n=2$, not
+  0.866. The gate only matters when noise lowers it.
+\item \textbf{$n=0$ is searched as a sink, never reported.} Common-mode
+  signal (baseline drift, pickup every coil sees alike) scores 1.000 at $n=0$
+  but 0.866 at $n=\pm1$. Without $n=0$ in the list the argmax would send it
+  to $n=\pm1$ and it would pass a 0.8 gate. With $n=0$ present the argmax
+  claims it for $n=0$, and the $|n|\ge1$ masks exclude it.
+\item \textbf{Noise floor.} For independent zero-mean coil noise of equal
+  variance $\sigma^2$, $E|Z_n|^2 = N_c\sigma^2$ and $E\sum_c|S_c|^2=N_c\sigma^2$,
+  so $\mathrm{coh}_n \approx 1/N_c = 0.2$. The assigned (maximum over nine
+  $n$) value runs higher, nearer $2/N_c$.
+\end{enumerate}
+
+\section{Leakage test on frequency}
+Under rigid rotation a mode of number $n$ appears at $f \approx n f_{\mathrm{rot}}$.
+An $n=1$ bin flipped into the $|n|=2$ trace keeps the $n=1$ frequency:
+$F_a(|n|{=}2)/F_a(|n|{=}1)\approx 1$, at the same time. A genuine $n=2$, or an
+overtone of $n=1$, sits at $\approx 2$. \texttt{check\_n\_leakage.py} applies
+this; \texttt{run\_master.py -{}-harmonics} then separates an overtone
+(phase-locked, $hp\to1$) from a separate $n=2$ ($hp\sim 1/\sqrt{N_\mathrm{eff}}$).
+
+\end{document}
