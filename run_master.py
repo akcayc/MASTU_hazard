@@ -150,7 +150,7 @@ def schmitt_first_crossing(time, signal, level, debounce=0.008,
 def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
                     ft_cfg=None, coherence_min=0.0, want_profiles=False,
                     normalize_floor=False, absolute_n=True,
-                    amp_form="centroid"):
+                    amp_form="centroid", harmonics=False):
     """Fetch everything one shot contributes, on that shot's flat-top window.
 
     absolute_n: traces are keyed by |n| and pool both senses of rotation, as
@@ -193,7 +193,8 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     ntor = np.array([n for n in (ntor_list or NTOR_DEFAULT) if n != 0])
     try:
         modes, meta = analyze_shot(shot, NFFT=NFFT, ntor=ntor,
-                                   coh_min=coherence_min, absolute_n=absolute_n)
+                                   coh_min=coherence_min, absolute_n=absolute_n,
+                                   harmonics=harmonics)
     except Exception as e:
         out["reason"] = f"OMAHA: {e}"
         return out
@@ -251,6 +252,9 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
         win = (t >= t_a) & (t <= t_b)
         traces[int(n)] = {"time": t[win], "amp": sig[win], "coherence": coh[win],
                           "freq": frq[win], "floor": floor}
+        for k in ("pk_bin", "z_pk", "z_h"):
+            if k in m:
+                traces[int(n)][k] = np.asarray(m[k])[win]
     if not traces:
         out["reason"] = "no usable OMAHA trace"
         return out
@@ -290,8 +294,38 @@ def collect_signals(shot, client, t_start=0.2, ntor_list=None, NFFT=512,
     return out
 
 
+def harmonic_stats(t, tr, tr1, b, tc, half_window):
+    """Overtone tests for the |n|=b trace against |n|=1, over |t - tc| <= W.
+
+        hf  median |k_b / (b k_1) - 1|, peak bins     overtone ~ 0
+        ha  corr(log A_b, log A_1)                     overtone ~ 1
+        hp  |sum z_h conj(z_1)^b| / sum |z_h||z_1|^b   overtone ~ 1, noise
+            ~ 1/sqrt(N_eff); z_h is n=b at bin b*k_1, so this is the
+            bicoherence and the bin width does not limit it
+
+    NaN where fewer than 3 slices qualify.
+    """
+    w = np.abs(t - tc) <= half_window
+    k1, kb = tr1["pk_bin"][w], tr["pk_bin"][w]
+    m = (k1 > 0) & (kb > 0)
+    hf = float(np.median(np.abs(kb[m] / (b * k1[m]) - 1))) if m.sum() >= 3 else np.nan
+    a1, ab = tr1["amp"][w], tr["amp"][w]
+    m = np.isfinite(a1) & np.isfinite(ab) & (a1 > 0) & (ab > 0)
+    ha = (float(np.corrcoef(np.log(ab[m]), np.log(a1[m]))[0, 1])
+          if m.sum() >= 3 else np.nan)
+    z1, zh = tr1["z_pk"][w], tr["z_h"][w]
+    m = np.isfinite(z1) & np.isfinite(zh)
+    if m.sum() >= 3:
+        num = np.abs(np.sum(zh[m] * np.conj(z1[m]) ** b))
+        den = np.sum(np.abs(zh[m]) * np.abs(z1[m]) ** b)
+        hp = float(num / den) if den > 0 else np.nan
+    else:
+        hp = np.nan
+    return hf, ha, hp
+
+
 def detect_ladder(sig, ladder, n_detect=1, debounce=0.008,
-                  freq_step_max=None):
+                  freq_step_max=None, harmonic_window=None):
     """Per ladder level: the first crossing time, and Fa and coherence there.
 
     Fa at the crossing is the mode frequency at onset.  It costs nothing -- it
@@ -299,6 +333,9 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008,
     event from a locked one, feeds a frequency-drop detector, and gives the
     survival table a screening column.  Columns are rm/fa/co at the same level,
     so a threshold selects a consistent triple.
+
+    harmonic_window (half-width [s]) adds hf/ha/hp per level for |n| >= 2, see
+    harmonic_stats; it needs the trace built with harmonics=True.
     """
     tr = sig["traces"].get(int(n_detect))
     if tr is None:
@@ -307,6 +344,8 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008,
             f"no trace for n={n_detect} on shot {sig.get('shot')}; "
             f"available: {sorted(sig['traces'])}")
     t, frq, coh = tr["time"], tr["freq"], tr["coherence"]
+    b = abs(int(n_detect))
+    tr1 = sig["traces"].get(1) if (harmonic_window and b >= 2) else None
     out = {}
     for lv in ladder:
         tc = schmitt_first_crossing(t, tr["amp"], lv, debounce,
@@ -320,6 +359,13 @@ def detect_ladder(sig, ladder, n_detect=1, debounce=0.008,
         else:
             out[f"fa{lv:.5f}"] = np.nan
             out[f"co{lv:.5f}"] = np.nan
+        if tr1 is not None:
+            hf = ha = hp = np.nan
+            if np.isfinite(tc):
+                hf, ha, hp = harmonic_stats(t, tr, tr1, b, tc, harmonic_window)
+            out[f"hf{lv:.5f}"] = hf
+            out[f"ha{lv:.5f}"] = ha
+            out[f"hp{lv:.5f}"] = hp
     return out
 
 
@@ -327,13 +373,17 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                       t_start=0.2, n_detect=1, debounce=0.008,
                       coherence_min=0.0, ft_cfg=None, normalize_floor=False,
                       freq_step_max=None,
-                      absolute_n=True, amp_form="centroid"):
+                      absolute_n=True, amp_form="centroid",
+                      harmonic_window=None):
     """Run the detector over `shots` and return one ladder table per n.
 
     n_detect is one n or a list of them.  collect_signals analyses every n in
     ntor_list anyway, so each shot is fetched and transformed once and every
     requested n is laddered off the same traces.  Returns `tables`, keyed by n,
     and `table`, the first n's, for single-n callers.
+
+    harmonic_window (half-width [s], None = off) adds the overtone tests
+    hf/ha/hp to the |n| >= 2 ladders; see harmonic_stats.
     """
     ladder = DEFAULT_LADDER if ladder is None else np.asarray(ladder)
 
@@ -354,13 +404,21 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
             f"Each ladder triggers on one toroidal mode number, which must be one "
             f"of those analysed. Add it to --n-tor, or drop it from --n-detect.")
 
+    if harmonic_window is not None:
+        if not absolute_n:
+            raise ValueError("--harmonics needs |n|; drop --signed-n")
+        if 1 not in ntor:
+            raise ValueError("--harmonics needs n=1 in --n-tor: it is the "
+                             "parent every overtone is tested against")
+
     rows, dropped = {n: [] for n in n_list}, {}
 
     for shot in shots:
         sig = collect_signals(shot, client, t_start=t_start, ntor_list=ntor_list,
                               NFFT=NFFT, ft_cfg=ft_cfg, coherence_min=coherence_min,
                               normalize_floor=normalize_floor,
-                              absolute_n=absolute_n, amp_form=amp_form)
+                              absolute_n=absolute_n, amp_form=amp_form,
+                              harmonics=harmonic_window is not None)
         if not sig["ok"]:
             dropped[shot] = sig["reason"]
             print(f"{shot}: dropped -- {sig['reason']}")
@@ -372,8 +430,10 @@ def build_rm_detector(shots, client, ladder=None, ntor_list=None, NFFT=512,
                    "floor": sig["traces"][n]["floor"],
                    "truncated": int(sig["truncated"]),
                    "lost_exposure": sig["lost_exposure"]}
+            if harmonic_window is not None and n >= 2:
+                row["harmonic_window"] = harmonic_window
             row.update(detect_ladder(sig, ladder, n, debounce,
-                                     freq_step_max))
+                                     freq_step_max, harmonic_window))
             rows[n].append(row)
         print(f"{shot}: ok  window [{sig['tsof']:.4f}, {sig['teof']:.4f}] s")
 
@@ -397,7 +457,7 @@ def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                NFFT=512, t_start=0.2, out_csv=None, coherence_min=0.0,
                debounce=0.008, n_detect=1, normalize_floor=False,
                ladder_spec=None, absolute_n=True, amp_form="centroid",
-               freq_step_max=None):
+               freq_step_max=None, harmonic_window=None):
     n_list = [int(n) for n in np.atleast_1d(n_detect)]
     if absolute_n:
         n_list = [abs(n) for n in n_list]
@@ -420,7 +480,8 @@ def run_master(shots, build_detector=False, thresholds=None, ntor_list=None,
                                 coherence_min=coherence_min,
                                 normalize_floor=normalize_floor,
                                 absolute_n=absolute_n, amp_form=amp_form,
-                                freq_step_max=freq_step_max)
+                                freq_step_max=freq_step_max,
+                                harmonic_window=harmonic_window)
         outputs["detector"] = det
         for n, path in paths.items():
             det["tables"][n].to_csv(path, index=False)
@@ -464,6 +525,15 @@ def main():
                              "more than this many Hz from the previous one. "
                              "1000-2000 passes chirps and locking transitions "
                              "while rejecting noise, which hops ~16 kHz/slice")
+    parser.add_argument("--harmonics", action="store_true",
+                        help="OFF by default. Add hf/ha/hp per level to the "
+                             "|n|>=2 ladders: frequency lock, amplitude "
+                             "correlation and phase lock (bicoherence) against "
+                             "|n|=1, telling an n=1 overtone from a separate mode")
+    parser.add_argument("--harmonic-window", type=float, default=0.020,
+                        help="half-width [s] around each crossing over which "
+                             "--harmonics averages (default 0.020: ~31 slices, "
+                             "~23 independent)")
     parser.add_argument("--normalize-floor", action="store_true",
                         help="divide the amplitude by each shot's pre-plasma "
                              "floor and use a signal-to-floor ladder; off by "
@@ -500,6 +570,7 @@ def main():
         absolute_n=not args.signed_n,
         amp_form=args.amp_form,
         freq_step_max=args.freq_step_max,
+        harmonic_window=args.harmonic_window if args.harmonics else None,
     )
 
 

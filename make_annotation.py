@@ -14,6 +14,8 @@ DIII-D feature extractor expects.
 Two further columns follow when the ladder carries them: fa_event, the mode
 frequency at the crossing, and coh_event, the coherence there.  They cost
 nothing to carry and they are what tells a rotating event from a locked one.
+A |n|>=2 ladder built with --harmonics adds hf_event, ha_event and hp_event,
+the overtone tests against |n|=1 at the crossing (see run_master.harmonic_stats).
 
 With no locked-mode detector, tlm is always NaN and ievent is 0 or 1.  The
 schema keeps the column so the LM branch can be added without a format change.
@@ -52,7 +54,7 @@ def threshold_path(out, threshold):
     return f"{root}_threshold{threshold:.5g}{ext or '.csv'}"
 
 
-def build(df, col, eq_start, fa_col=None, co_col=None):
+def build(df, col, eq_start, fa_col=None, co_col=None, h_cols=None):
     rows, skipped = [], {}
     n_before_eq = 0
     for _, r in df.iterrows():
@@ -83,6 +85,8 @@ def build(df, col, eq_start, fa_col=None, co_col=None):
         # just the end of the window, where no crossing happened
         row["fa_event"] = float(r[fa_col]) if (fa_col and ievent == 1) else np.nan
         row["coh_event"] = float(r[co_col]) if (co_col and ievent == 1) else np.nan
+        for name, c in (h_cols or {}).items():
+            row[name] = float(r[c]) if ievent == 1 else np.nan
         rows.append(row)
     return pd.DataFrame(rows), skipped, n_before_eq
 
@@ -107,17 +111,19 @@ def main():
     if fa_col is None:
         print("  note: ladder has no fa*/co* columns (pre-dates them); "
               "fa_event and coh_event will be empty")
-    ann, skipped, n_before_eq = build(df, col, a.eq_start, fa_col, co_col)
+    h_cols = {f"{p}_event": col.replace("rm", p, 1) for p in ("hf", "ha", "hp")
+              if col.replace("rm", p, 1) in df.columns}
+    ann, skipped, n_before_eq = build(df, col, a.eq_start, fa_col, co_col, h_cols)
 
     if ann.empty:
         raise SystemExit("no usable shots")
     ann = ann.sort_values("shot")
     out = threshold_path(a.out, lv)
-    # the first seven columns are the format extract_features reads; the two
+    # the first seven columns are the format extract_features reads; those
     # that follow are extra and are ignored by anything that does not want them
     ann.to_csv(out, index=False,
                columns=["shot", "tsof", "teof", "trm", "tlm", "tevent", "ievent",
-                        "fa_event", "coh_event"])
+                        "fa_event", "coh_event"] + list(h_cols))
 
     E = int((ann["ievent"] > 0).sum())
     N = len(ann)

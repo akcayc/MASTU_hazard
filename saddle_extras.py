@@ -93,6 +93,70 @@ from saddle_analysis import (
 COHERENCE_GATE_SUGGESTED = 0.6
 
 
+def _bin_index(rm, sel: AmplitudeSelector):
+    """Boolean (freq, time) selections of the band and time range, as upstream."""
+    F, time = rm.freq, rm.time
+    idf = (F >= min(sel.f_min)) & (F <= max(sel.f_max))
+    idf[0] = False
+    idf[-1] = False
+    idt = (time >= min(sel.time)) & (time <= max(sel.time))
+    return idf, idt
+
+
+def harmonic_inputs(rm, sp, sels, coh_min, orders):
+    """Per-slice inputs for telling an n=1 overtone from a separate mode.
+
+    Needs |n| (absolute_n) and n=1 among `sels`.  For each |n| in sels, the
+    slice's peak bin among the bins counting toward |n| (same mask as the
+    amplitude), the sign that claimed it, and the complex mode amplitude there,
+    rebuilt from the coil spectra exactly as n_detection forms it before taking
+    |.| -- n_detection keeps no phase.  For each order b in `orders` (b >= 2),
+    also the complex n = s*b amplitude at bin b*k1, where s and k1 are the
+    n=1 peak's sign and bin: an overtone of n=1 puts its power exactly there,
+    phase-locked.
+
+    Returns {n: {"pk_bin", "pk_sign", "z_pk", "jt", "z_h"}} on the amplitude
+    time base; pk_bin is the index into rm.freq, -1 where no bin survived, jt
+    the index into rm.time, and z_h is only present for n in orders.
+    """
+    signed = sorted({s * n for n in sels for s in (-1, 1)}
+                    | {s * b for b in orders for s in (-1, 1)})
+    row = {s: i for i, s in enumerate(signed)}
+    ap = np.exp(1j * np.radians(sp.phi) * np.asarray(signed)[:, None])
+    Z = np.tensordot(ap, sp.spectrum, axes=(1, 0))          # (n, freq, time)
+    nF = Z.shape[1]
+
+    out = {}
+    for n, sel in sels.items():
+        s_ = _select_bins(rm, sel, coh_min, absolute_n=True)
+        idf, idt = _bin_index(rm, sel)
+        jt = np.flatnonzero(idt)
+        if s_ is None or jt.size == 0:
+            out[n] = {"pk_bin": np.zeros(0, int), "z_pk": np.zeros(0, complex),
+                      "pk_sign": np.zeros(0, int), "jt": jt}
+            continue
+        _, _, P, id_mask, _ = s_
+        P = np.where(id_mask, -np.inf, P)
+        kk = np.argmax(P, axis=1)                           # local column
+        ok = np.isfinite(P[np.arange(P.shape[0]), kk])
+        g = np.where(ok, np.flatnonzero(idf)[kk], -1)       # global freq bin
+        sign = np.where(ok, np.sign(rm.ntor[np.maximum(g, 0), jt]), 0).astype(int)
+        z = np.full(jt.size, np.nan + 0j)
+        for s in (-1, 1):
+            m = ok & (sign == s)
+            z[m] = Z[row[s * n], g[m], jt[m]]
+        out[n] = {"pk_bin": g, "z_pk": z, "pk_sign": sign, "jt": jt}
+
+    p = out[1]
+    for b in orders:
+        zh = np.full(p["pk_bin"].size, np.nan + 0j)
+        for s in (-1, 1):
+            m = (p["pk_sign"] == s) & (p["pk_bin"] >= 0) & (b * p["pk_bin"] < nF)
+            zh[m] = Z[row[s * b], b * p["pk_bin"][m], p["jt"][m]]
+        out[b]["z_h"] = zh
+    return out
+
+
 def _select_bins(rm, sel: AmplitudeSelector, coh_min, absolute_n):
     """The (time, freq) bins that count toward sel.ntor, and their coherence.
 
@@ -103,14 +167,7 @@ def _select_bins(rm, sel: AmplitudeSelector, coh_min, absolute_n):
     F, time = rm.freq, rm.time
     if time.size < 2:
         return None
-
-    f_min, f_max = min(sel.f_min), max(sel.f_max)
-    t_min, t_max = min(sel.time), max(sel.time)
-
-    idf = (F >= f_min) & (F <= f_max)
-    idf[0] = False
-    idf[-1] = False
-    idt = (time >= t_min) & (time <= t_max)
+    idf, idt = _bin_index(rm, sel)
 
     power_spectrum = rm.power.T[:, idf][idt, :]
     Fsel = F[idf]
@@ -275,13 +332,17 @@ def noise_floor(time, values, t_pre=0.020):
 
 def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
                  freq_min=None, freq_max=None, v_min=VMIN_DEFAULT,
-                 t_pre=0.020, out=None, coh_min=0.0, absolute_n=True):
+                 t_pre=0.020, out=None, coh_min=0.0, absolute_n=True,
+                 harmonics=False):
     """Per-shot analysis with coherence and noise floor.
 
     absolute_n=True (default, as DIII-D): per_n is keyed by |n|, and each entry
     pools the +|n| and -|n| bins.  Both signs are always searched, whatever
     `ntor` holds, since a bin must be able to be assigned to either.
     absolute_n=False keeps the signed keys of the original routine.
+
+    harmonics=True (needs absolute_n and |n|=1) adds pk_bin, z_pk and, for
+    |n| >= 2, z_h to each entry: see harmonic_inputs.
 
     Returns (per_n, meta):
         per_n[n] = {amp, damp_dt, freq, time, coherence, noise_floor, LMlabels}
@@ -338,10 +399,12 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
 
     sp = sd.spectrum(NFFT)
     rm = sp.n_detection(np.asarray(search))
+    sels = {}
 
     for n in ntor:
         n = int(n)
         sel = AmplitudeSelector(n, time_interval, freq_min, freq_max, v_min)
+        sels[n] = sel
         t, freq, Bp, Ba, coh = amplitude_with_coherence(rm, sel, coh_min,
                                                         absolute_n=absolute_n)
         _, Bd = amplitude_diiid(rm, sel, coh_min, absolute_n=absolute_n)
@@ -358,6 +421,16 @@ def analyze_shot(shot, NFFT=NFFT_DEFAULT, ntor=None, time_interval=None,
             "noise_floor": noise_floor(t, Ba, t_pre),
             "LMlabels": (freq < LM_FREQ_HZ).astype(int),
         }
+
+    if harmonics:
+        if not absolute_n or 1 not in sels:
+            raise ValueError("harmonics needs absolute_n and |n|=1 analysed")
+        h = harmonic_inputs(rm, sp, sels, coh_min,
+                            orders=[n for n in sels if n >= 2])
+        for n, d in h.items():
+            per_n[n].update(pk_bin=d["pk_bin"], z_pk=d["z_pk"])
+            if "z_h" in d:
+                per_n[n]["z_h"] = d["z_h"]
 
     meta = {
         "shot": shot,

@@ -46,7 +46,7 @@ recomputation over the database.
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite, 7 modules; runs without Freya |
+| `tests/` | Offline test suite, 8 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two
@@ -479,6 +479,29 @@ it does not prove.
 crossings fall within `--dt-window` bold. Only the bold ones compare Fa at about
 one time. Ratios outside 1/3..6 are counted at the panel edges, not piled into
 the end bins.
+
+### Overtone or separate mode: `--harmonics`
+
+A ratio near 2 cannot tell a separate n=2 from the overtone of a
+non-sinusoidal n=1 island. `run_master.py --harmonics` (off by default) adds
+three columns per level to each \|n\|>=2 ladder, computed over
+\|t - t_cross\| <= `--harmonic-window` (default 0.020 s):
+
+| column | test | overtone | separate mode |
+|---|---|---|---|
+| `hp` | phase lock \|sum z_b conj(z_1)^b\| / sum \|z_b\|\|z_1\|^b | ~1 | ~1/sqrt(N_eff) |
+| `hf` | median \|k_b / (b k_1) - 1\|, peak bins | ~0 | > 0 if the offset exceeds a bin |
+| `ha` | corr(log A_b, log A_1) | ~1 | anything |
+
+`hp` is the bicoherence: z_1 is n=1 at its peak bin k_1, z_b is n=b at bin
+b k_1. `n_detection` keeps no phase, so `analyze_shot` rebuilds the complex
+mode spectrum from the coil spectra. With the 390 Hz bins at 200 kHz / 512,
+and 50% Hann overlap, +/-20 ms holds 31 slices, ~23 independent, so noise
+reads hp ~ 0.21. `hf` and `ha` only support `hp`: an 8% offset at 8 kHz sits
+inside one bin, and two smooth envelopes over 40 ms correlate regardless
+(`tests/test_harmonics.py` shows both). `make_annotation.py` carries the chosen
+level's values as `hf_event`, `ha_event`, `hp_event`. Needs \|n\|=1 in
+`--n-tor` and is refused with `--signed-n`.
 
 ## Optional: Fa continuity in the trigger
 
