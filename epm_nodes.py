@@ -31,7 +31,12 @@ GLOBALS = {
 #: inputs to derived quantities, not features themselves
 SOURCES = {
     "ip":      "OUTPUT/GLOBALPARAMETERS/PLASMACURRENT",
-    "bt0":     "OUTPUT/GLOBALPARAMETERS/BVACRMAG",
+    # Bt0 normalises iphat and the pressure features.  DIII-D uses EFIT's \BT0,
+    # the FULL toroidal field at the magnetic axis (plasma included), not
+    # BCENTR (vacuum, at RZERO).  The EFIT++ counterpart is BPHIRMAG; BVACRMAG,
+    # used before, is the vacuum field at the axis.  BPHIRMAG is taken from
+    # EFIT++ naming (MAST's EFM_BPHI_RMAG) and is UNVERIFIED in EPM: --probe it.
+    "bt0":     "OUTPUT/GLOBALPARAMETERS/BPHIRMAG",
     "aminor":  "OUTPUT/SEPARATRIXGEOMETRY/MINORRADIUS",
     "rbdry":   "OUTPUT/SEPARATRIXGEOMETRY/RBOUNDARY",
     "zbdry":   "OUTPUT/SEPARATRIXGEOMETRY/ZBOUNDARY",

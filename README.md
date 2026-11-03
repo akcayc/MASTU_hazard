@@ -46,7 +46,7 @@ recomputation over the database.
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite, 9 modules; runs without Freya |
+| `tests/` | Offline test suite, 10 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two

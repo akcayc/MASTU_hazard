@@ -221,19 +221,37 @@ def fetch_record(shot, tag, client):
 # ---------------------------------------------------------------------------
 # derived quantities
 # ---------------------------------------------------------------------------
+def midplane_width(r, z, z0=0.0):
+    """R_out - R_in where the closed boundary (r, z) crosses Z = z0; NaN if
+    it crosses fewer than twice."""
+    r, z = np.append(r, r[0]), np.append(z, z[0])
+    dz = z - z0
+    i = np.flatnonzero((dz[:-1] * dz[1:] <= 0) & (dz[:-1] != dz[1:]))
+    if i.size < 2:
+        return np.nan
+    w = dz[i] / (dz[i] - dz[i + 1])
+    rc = r[i] + w * (r[i + 1] - r[i])
+    return float(rc.max() - rc.min())
+
+
 def derive(rec):
     nt = rec["time"].size
 
     # (4) boundary arrays are padded -- truncate per slice
     rb, zb = np.atleast_2d(rec["rbdry"]), np.atleast_2d(rec["zbdry"])
     bbox = np.full((nt, 4), np.nan)
+    chord = np.full(nt, np.nan)
     for k in range(nt):
         r, z = rb[k], zb[k]
         ok = np.isfinite(r) & np.isfinite(z) & (r > 0)
         if ok.sum() < 3:
             continue
         bbox[k] = [r[ok].min(), r[ok].max(), z[ok].min(), z[ok].max()]
+        chord[k] = midplane_width(r[ok], z[ok])
     rec["bbox"] = bbox
+    # a boundary that misses Z = 0 entirely falls back to its full width
+    rec["chord_fallback"] = int(np.sum(np.isnan(chord) & np.isfinite(bbox[:, 0])))
+    rec["chord"] = np.where(np.isnan(chord), bbox[:, 1] - bbox[:, 0], chord)
 
     a = np.asarray(rec["aminor"], float)
     rec["aminor_alt"] = (bbox[:, 1] - bbox[:, 0]) / 2.0
@@ -250,13 +268,14 @@ def derive(rec):
 
     # Greenwald-normalised density.  n_GW = |Ip[MA]| / (pi a^2) in 1e20 m^-3;
     # ANE/DENSITY is line-INTEGRATED (m^-2), so a chord length is needed to
-    # reach a line-averaged density.  Using the outboard-inboard width of the
-    # boundary as that chord.
+    # reach a line-averaged density.  The chord is the boundary's width along
+    # the machine midplane Z = 0, i.e. a horizontal midplane line of sight --
+    # an assumption about the interferometer geometry, not yet checked.
     rec["nhat"] = np.full(nt, np.nan)
     if rec["ne_bar"] is not None:
         tne, ne = rec["ne_bar"]
         ne_i = np.interp(rec["time"], tne, ne, left=np.nan, right=np.nan)
-        chord = bbox[:, 1] - bbox[:, 0]
+        chord = rec["chord"]
         with np.errstate(invalid="ignore", divide="ignore"):
             n_bar = 1.0e-20 * ne_i / chord                   # 1e20 m^-3
             ngw = np.abs(rec["ip"] / 1.0e6) / (np.pi * a ** 2)
