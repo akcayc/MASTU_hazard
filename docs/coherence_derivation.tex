@@ -147,10 +147,10 @@ With \texttt{absolute\_n} the $|n|$ trace pools bins assigned to $+|n|$ and $-|n
   but 0.866 at $n=\pm1$. Without $n=0$ in the list the argmax would send it
   to $n=\pm1$ and it would pass a 0.8 gate. With $n=0$ present the argmax
   claims it for $n=0$, and the $|n|\ge1$ masks exclude it.
-\item \textbf{Noise floor.} For independent zero-mean coil noise of equal
-  variance $\sigma^2$, $E|Z_n|^2 = N_c\sigma^2$ and $E\sum_c|S_c|^2=N_c\sigma^2$,
-  so $\mathrm{coh}_n \approx 1/N_c = 0.2$. The assigned (maximum over nine
-  $n$) value runs higher, nearer $2/N_c$.
+\item \textbf{Noise floor.} Pure coil noise gives $E[\mathrm{coh}_n]=1/N_c=0.2$
+  at every $n$, exactly. The assigned value (maximum over the nine searched
+  $n$) averages about $2/N_c$. Derivation and tail probabilities in
+  Section~7.
 \end{enumerate}
 
 \section{Leakage test on frequency}
@@ -160,5 +160,77 @@ $F_a(|n|{=}2)/F_a(|n|{=}1)\approx 1$, at the same time. A genuine $n=2$, or an
 overtone of $n=1$, sits at $\approx 2$. \texttt{check\_n\_leakage.py} applies
 this; \texttt{run\_master.py -{}-harmonics} then separates an overtone
 (phase-locked, $hp\to1$) from a separate $n=2$ ($hp\sim 1/\sqrt{N_\mathrm{eff}}$).
+
+
+\section{Noise floor}
+\subsection{Exact mean}
+Write $a_c=e^{\,in\varphi_c}$, so $|a_c|=1$. Expand the numerator:
+\[
+\Bigl|\sum_c a_c S_c\Bigr|^2
+= \sum_c |S_c|^2 \;+\; \sum_{c\neq d} a_c a_d^{*}\, S_c S_d^{*} .
+\]
+Divide by the denominator $N_c\sum_c|S_c|^2$:
+\[
+\mathrm{coh}_n = \frac{1}{N_c}
+\;+\; \frac{1}{N_c}\,\frac{\sum_{c\neq d} a_c a_d^{*}\, S_c S_d^{*}}{\sum_e |S_e|^2} .
+\]
+The first term is $1/N_c$ for \emph{every} realisation. For the second,
+assume each coil's noise has a uniformly random phase, independent of the
+other coils. Rotating one coil, $S_c\to e^{i\theta}S_c$, leaves
+$\sum_e|S_e|^2$ unchanged and multiplies every cross term containing $S_c$
+by $e^{\pm i\theta}$. Averaging over $\theta$ sends each cross term to zero:
+\[
+E\!\left[\frac{S_c S_d^{*}}{\sum_e |S_e|^2}\right] = 0 \quad (c\neq d)
+\qquad\Longrightarrow\qquad
+\boxed{\;E[\mathrm{coh}_n] = \frac{1}{N_c} = 0.2\;}
+\]
+for every $n$. This needs neither Gaussian noise nor equal noise on the
+coils; only independent, phase-random noise. A spectrogram bin away from
+DC satisfies the phase condition well.
+
+\subsection{Distribution and tail}
+For independent circular complex Gaussian noise of equal variance,
+$S/|S|$ is uniform on the unit sphere in $\mathbb{C}^{N_c}$, and
+$\mathrm{coh}_n = |\hat a^{\dagger} S|^2/|S|^2$ with the unit vector
+$\hat a=a/\sqrt{N_c}$. Its projection is Beta-distributed:
+\[
+\mathrm{coh}_n \sim \mathrm{Beta}(1,\,N_c-1), \qquad
+P(\mathrm{coh}_n > x) = (1-x)^{N_c-1}, \qquad
+\sigma = \sqrt{\frac{N_c-1}{N_c^2(N_c+1)}} = 0.163 .
+\]
+The mean is a poor guide: the spread is nearly as large as the mean.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Pure noise, per bin (400k samples) & Simulated & Theory \\
+\midrule
+$E[\mathrm{coh}_n]$, any $n$ & 0.200 & $1/N_c = 0.2$ \\
+$\sigma(\mathrm{coh}_n)$ & 0.164 & 0.163 \\
+$P(\mathrm{coh}_n > 0.8)$ & 0.0017 & $0.2^4 = 0.0016$ \\
+$E[\max_n \mathrm{coh}_n]$, nine $n$ & 0.40 & none derived \\
+$P(\max_n \mathrm{coh}_n > 0.8)$ & 0.011 & none derived \\
+\bottomrule
+\end{tabular}
+\end{center}
+The nine $\mathrm{coh}_n$ are not independent (the array factors overlap),
+so the maximum has no simple closed form; the values are from simulation.
+
+\subsection{When the floor changes}
+\begin{itemize}
+\item \textbf{Unequal coil noise.} The mean stays $1/N_c$ (Section~7.1), but
+  the tail changes. With one coil three times noisier,
+  $P(\mathrm{coh}_n>0.8)$ falls to $0.0006$: the noisy coil dominates and
+  no $n$ fits it.
+\item \textbf{Correlated noise.} Pickup common to several coils keeps cross
+  terms alive, and the floor rises at whichever $n$ matches the pickup
+  pattern. Pure common mode lands at $n=0$ (Section~5, item~4).
+\end{itemize}
+
+\subsection{Consequence for detection}
+A 1--50\,kHz band holds about $49\,000/390.6\approx125$ frequency bins. With
+pure noise and a 0.8 gate, about $125\times0.011\approx1.4$ bins per time
+slice pass at some $n$. Coherence alone does not reject noise bin by bin;
+the amplitude threshold does.
 
 \end{document}
