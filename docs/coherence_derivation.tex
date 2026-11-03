@@ -189,15 +189,42 @@ coils; only independent, phase-random noise. A spectrogram bin away from
 DC satisfies the phase condition well.
 
 \subsection{Distribution and tail}
-For independent circular complex Gaussian noise of equal variance,
-$S/|S|$ is uniform on the unit sphere in $\mathbb{C}^{N_c}$, and
-$\mathrm{coh}_n = |\hat a^{\dagger} S|^2/|S|^2$ with the unit vector
-$\hat a=a/\sqrt{N_c}$. Its projection is Beta-distributed:
-\[
-\mathrm{coh}_n \sim \mathrm{Beta}(1,\,N_c-1), \qquad
-P(\mathrm{coh}_n > x) = (1-x)^{N_c-1}, \qquad
-\sigma = \sqrt{\frac{N_c-1}{N_c^2(N_c+1)}} = 0.163 .
-\]
+Assume pure noise: the $S_c$ independent, circular complex Gaussian
+$\mathcal{CN}(0,\sigma^2)$, with the same $\sigma$ on every coil. Then each
+noise-only bin's $\mathrm{coh}_n$, at one fixed $n$, is one draw from a Beta
+distribution. Four steps:
+
+\begin{enumerate}
+\item \textbf{Unit steering vector.} With
+  $\hat a = (e^{in\varphi_1},\dots,e^{in\varphi_{N_c}})/\sqrt{N_c}$, $|\hat a|=1$,
+  \[
+  \mathrm{coh}_n = \frac{|\hat a^{\dagger} S|^2}{|S|^2},
+  \]
+  the fraction of the bin's total coil power lying along the $n$ direction.
+\item \textbf{Rotate.} Take a unitary $U$ whose first row is $\hat a^{\dagger}$
+  and set $T=US$. White circular Gaussian noise is unchanged in distribution
+  by a unitary rotation, so $T_1,\dots,T_{N_c}$ are again independent
+  $\mathcal{CN}(0,\sigma^2)$. The numerator is $|\hat a^{\dagger}S|^2=|T_1|^2$;
+  the denominator is $|S|^2=\sum_k|T_k|^2$, since rotation preserves length.
+\item \textbf{Gammas.} Each $|T_k|^2$ is exponential, i.e.\
+  $\mathrm{Gamma}(1,\sigma^2)$. So $X=|T_1|^2\sim\mathrm{Gamma}(1)$ and
+  $Y=\sum_{k\ge2}|T_k|^2\sim\mathrm{Gamma}(N_c-1)$, independent of each other.
+\item \textbf{Beta.} For independent Gammas of common scale,
+  $X/(X+Y)\sim\mathrm{Beta}(1,N_c-1)$, and the ratio is independent of
+  $X+Y$. Hence
+  \[
+  \mathrm{coh}_n \sim \mathrm{Beta}(1,\,N_c-1):\quad
+  p(x) = (N_c-1)(1-x)^{N_c-2} = 4(1-x)^3,
+  \]
+  \[
+  E = \frac{1}{N_c} = 0.2,\qquad
+  \sigma = \sqrt{\frac{N_c-1}{N_c^2(N_c+1)}} = 0.163,\qquad
+  P(\mathrm{coh}_n > x) = (1-x)^{N_c-1}.
+  \]
+  The independence of the ratio from $X+Y$ is also why
+  $E[\text{num}]/E[\text{den}]$ happens to give the right mean in this case;
+  Section~7.1 shows $1/N_c$ does not need Gaussian noise at all.
+\end{enumerate}
 The mean is a poor guide: the spread is nearly as large as the mean.
 
 \begin{center}
@@ -213,8 +240,25 @@ $P(\max_n \mathrm{coh}_n > 0.8)$ & 0.011 & none derived \\
 \bottomrule
 \end{tabular}
 \end{center}
-The nine $\mathrm{coh}_n$ are not independent (the array factors overlap),
-so the maximum has no simple closed form; the values are from simulation.
+What the Beta result does \emph{not} say:
+\begin{itemize}
+\item \textbf{Not independent across $n$.} $\mathrm{coh}_n$ and
+  $\mathrm{coh}_{n'}$ in one bin use the same five numbers and overlapping
+  steering vectors (the 0.866, 0.546, \ldots\ of Section~3). Each is
+  $\mathrm{Beta}(1,4)$ on its own, but they are correlated, so the maximum
+  over $n$ has no simple closed form; its values above are from simulation.
+\item \textbf{Not independent across bins.} Hann windows at 50\% overlap
+  correlate neighbouring time slices ($\rho=1/6$), and Hann leakage
+  correlates neighbouring frequency bins. Bins passing a gate on noise
+  arrive in clusters; the count in Section~7.4 is an average.
+\item \textbf{Not with a mode present.} A mode adds a fixed vector to $S$;
+  $X$ becomes noncentral and $\mathrm{coh}_n$ is pulled toward 1 by an
+  amount set by the signal-to-noise ratio. $\mathrm{Beta}(1,N_c-1)$ is the
+  no-mode case only.
+\item \textbf{Not with unequal coil noise.} Step 2 then fails: the rotation
+  changes the noise distribution. The mean stays $1/N_c$ (Section~7.1) but
+  the shape changes (Section~7.3).
+\end{itemize}
 
 \subsection{When the floor changes}
 \begin{itemize}
