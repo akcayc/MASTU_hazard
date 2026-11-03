@@ -13,6 +13,12 @@ shorter.  Nothing here imports pyuda, so it is testable offline.
     ...
     store.append(records)          # every CHUNK_SIZE shots
     recs = store.load_all()        # when finished
+
+Each chunk can carry a `meta` dict saying what produced it (extract_parallel
+puts the annotation's checksum there).  check_meta() refuses to resume a store
+whose chunks were made from something else, so one store never mixes two
+annotations; consolidate() copies the agreed meta into the pickle as
+`provenance`.
 """
 
 import os
@@ -30,36 +36,71 @@ class ChunkStore:
         self.prefix = prefix
         os.makedirs(path, exist_ok=True)
         self._done = None
+        self._metas = None
 
     # -- inspection ---------------------------------------------------------
     def chunk_files(self):
         return sorted(f for f in os.listdir(self.path)
                       if f.startswith(self.prefix + "-") and f.endswith(".pickle"))
 
+    def _scan(self):
+        self._done, self._metas = set(), {}
+        for f in self.chunk_files():
+            try:
+                with open(os.path.join(self.path, f), "rb") as fh:
+                    p = pickle.load(fh)
+            except Exception as e:
+                print(f"  warning: unreadable chunk {f} ({e}); ignoring")
+                continue
+            self._done |= set(p["shots"])
+            self._metas[f] = p.get("meta")
+
     def done(self):
         """Shots already stored.  Cached; call refresh() after an append."""
         if self._done is None:
-            self._done = set()
-            for f in self.chunk_files():
-                try:
-                    with open(os.path.join(self.path, f), "rb") as fh:
-                        self._done |= set(pickle.load(fh)["shots"])
-                except Exception as e:
-                    print(f"  warning: unreadable chunk {f} ({e}); ignoring")
+            self._scan()
         return self._done
 
+    def metas(self):
+        """{chunk file: meta}, None for a chunk written before metas existed."""
+        if self._metas is None:
+            self._scan()
+        return self._metas
+
     def refresh(self):
-        self._done = None
+        self._done = self._metas = None
         return self.done()
 
+    def check_meta(self, meta, keys):
+        """Hard error if any chunk's meta differs from `meta` on `keys`.
+
+        Chunks without a meta predate the check and cannot be verified; they
+        are counted and reported, not refused.
+        """
+        legacy, bad = 0, []
+        for f, m in self.metas().items():
+            if m is None:
+                legacy += 1
+            elif any(m.get(k) != meta.get(k) for k in keys):
+                bad.append((f, {k: m.get(k) for k in keys if m.get(k) != meta.get(k)}))
+        if bad:
+            f, diff = bad[0]
+            want = {k: meta.get(k) for k in diff}
+            raise SystemExit(
+                f"{self.path}: {len(bad)} chunks were made with different "
+                f"settings,\n  e.g. {f}: {diff}\n  this run: {want}\n"
+                f"  use a different --store, or delete {self.path}")
+        return legacy
+
     # -- writing ------------------------------------------------------------
-    def append(self, records, dropped=None):
+    def append(self, records, dropped=None, meta=None):
         """Write one chunk atomically.  `records` is a list of per-shot dicts."""
         if not records and not dropped:
             return None
         shots = [r["shot"] for r in records]
         payload = {"shots": shots, "records": records,
-                   "dropped": dropped or {}, "written": time.time()}
+                   "dropped": dropped or {}, "written": time.time(),
+                   "meta": meta}
         name = f"{self.prefix}-{len(self.chunk_files()):05d}-{int(time.time()*1e3)}.pickle"
         final = os.path.join(self.path, name)
         tmp = final + ".tmp"
@@ -70,6 +111,7 @@ class ChunkStore:
         os.replace(tmp, final)          # atomic: readers see old or new, never partial
         if self._done is not None:
             self._done |= set(shots)
+            self._metas[name] = meta
         return final
 
     # -- reading ------------------------------------------------------------
@@ -94,10 +136,21 @@ class ChunkStore:
 
 
 def consolidate(store, out_path):
-    """Merge a store into one pickle, matching extract_features' --out format."""
+    """Merge a store into one pickle, matching extract_features' --out format.
+
+    `provenance` is the chunks' common meta, with `unverified_chunks` counting
+    those written before metas existed; None if no chunk carries one.
+    check_meta() at write time is what keeps the metas in agreement.
+    """
     records, dropped = store.load_all()
+    metas = list(store.metas().values())
+    known = [m for m in metas if m is not None]
+    prov = dict(known[-1]) if known else None
+    if prov is not None:
+        prov["unverified_chunks"] = len(metas) - len(known)
     with open(out_path, "wb") as fh:
         pickle.dump({"records": records, "dropped": dropped,
-                     "tag": records[0]["tag"] if records else None}, fh,
+                     "tag": records[0]["tag"] if records else None,
+                     "provenance": prov}, fh,
                     protocol=pickle.HIGHEST_PROTOCOL)
     return len(records), len(dropped)

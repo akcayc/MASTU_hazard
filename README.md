@@ -46,7 +46,7 @@ recomputation over the database.
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite, 8 modules; runs without Freya |
+| `tests/` | Offline test suite, 9 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two
@@ -91,12 +91,12 @@ python run_master.py --shots $(seq 47000 47099) --build-detector \
 python ladder_base_rate.py rm_ladder.csv              # find the knee
 python plot_ladder.py rm_ladder.csv --out scan        # figures
 python make_annotation.py rm_ladder.csv --threshold <knee> --out joint.csv
-                                       # writes joint_threshold<value>.csv
-python extract_parallel.py --annotation joint_threshold<value>.csv --tag EPM \
-    --store harvest_EPM --workers 8                   # features
+                       # writes joint_n<n>_threshold<value>.csv and .json
+python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
+    --tag EPM --store harvest_EPM --workers 8         # features
 python extract_parallel.py --store harvest_EPM --consolidate feat_EPM.pickle
-python extract_parallel.py --annotation joint.csv --tag EPQ \
-    --store harvest_EPQ --workers 8
+python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
+    --tag EPQ --store harvest_EPQ --workers 8
 python extract_parallel.py --store harvest_EPQ --consolidate feat_EPQ.pickle
 python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \
     --out merged.pickle                               # the survival table
@@ -106,6 +106,27 @@ The threshold enters only at `make_annotation`, so changing your mind means
 redoing from there, not the detector. `run-study.sh` covers everything up to
 the consolidated pickles; the merge is a separate call because it joins two
 study outputs.
+
+**One annotation per folder.** Each annotation gets its own harvest stores and
+pickles, e.g. `47000_52000/n2_t0.003/`. Three things keep them apart:
+
+- `make_annotation` names the file by mode number and threshold, read from the
+  ladder's `whichn` and the column it snaps to, and writes a `.json` beside it:
+  ladder, n, threshold, `eq_start`, shot and event counts, date, git commit.
+  It is the per-annotation record that `run-study.sh`'s `annotation.txt` is
+  for a study folder.
+- `extract_parallel` writes the annotation's sha256 checksum, the tag and the
+  extraction options into every chunk. Resuming into a store made from a
+  different annotation, or with different options, is a hard error: otherwise
+  the shots already there would be skipped and keep the old chop and label.
+  `--consolidate` copies that record, with the `.json`, into the pickle as
+  `provenance`.
+- `merge_pair` refuses EPM and EPQ pickles with different checksums, prints
+  the annotation's n and threshold, and stores both provenances in
+  `merged.pickle`.
+
+Files made before this have no `.json` or checksum. They still work; the
+scripts say what they cannot verify.
 
 Checks worth running first on a new shot range or after a node-map edit:
 

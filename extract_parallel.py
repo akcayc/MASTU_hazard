@@ -5,6 +5,13 @@ That is 5.3 h for 10,000 shots across EPM and EPQ, serially.  The time is
 network latency, not computation -- the client is waiting, not working -- so
 threads help almost linearly until the server pushes back.
 
+A store belongs to ONE annotation.  Every chunk records the annotation's
+sha256 checksum, the tag and the extraction options; resuming into a store
+built from anything else is a hard error, since the shots already in it would
+otherwise be skipped and keep the old chop and label without a word.
+--consolidate copies that record, with the annotation's .json sidecar, into the
+pickle as `provenance`.
+
 Two pyuda notes:
   * Each worker gets its OWN client, via threading.local.  pyuda.Client is not
     documented as thread-safe and sharing one is not worth the risk.
@@ -32,6 +39,9 @@ tag, so the saving rarely justifies the risk.
 """
 
 import argparse
+import hashlib
+import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -88,8 +98,37 @@ def windows_from_annotation(path):
             {s: int(v["event"]) for s, v in ann.items()})
 
 
+#: the meta fields that must agree between a store's chunks and this run
+META_KEYS = ("sha256", "tag", "use_alts", "include_glitch", "min_timestamps")
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def source_meta(path, kind, tag, use_alts, include_glitch, min_timestamps):
+    """What a chunk records about how it was made.
+
+    `annotation` is make_annotation's .json sidecar, when there is one: n,
+    threshold, ladder and the rest travel with the features from here on.
+    """
+    side = os.path.splitext(path)[0] + ".json"
+    ann = None
+    if kind == "annotation" and os.path.isfile(side):
+        with open(side) as fh:
+            ann = json.load(fh)
+    return {"source": os.path.abspath(path), "source_kind": kind,
+            "sha256": file_sha256(path), "tag": tag, "use_alts": use_alts,
+            "include_glitch": include_glitch, "min_timestamps": min_timestamps,
+            "annotation": ann}
+
+
 def run(shots, windows, events, tag, store, workers, min_timestamps,
-        use_alts, include_glitch, chunk_size, report_every):
+        use_alts, include_glitch, chunk_size, report_every, meta=None):
     todo = [s for s in shots if s not in store.done()]
     skipped = len(shots) - len(todo)
     if skipped:
@@ -130,7 +169,7 @@ def run(shots, windows, events, tag, store, workers, min_timestamps,
             with lock:
                 n_done += 1
                 if len(buf) >= chunk_size:
-                    store.append(buf, dropped)
+                    store.append(buf, dropped, meta=meta)
                     buf, dropped = [], {}
                 if n_done % report_every == 0:
                     el = time.time() - t0
@@ -140,7 +179,7 @@ def run(shots, windows, events, tag, store, workers, min_timestamps,
                           f"ETA {eta/60:.1f} min")
 
     if buf or dropped:
-        store.append(buf, dropped)
+        store.append(buf, dropped, meta=meta)
     el = time.time() - t0
     print(f"  done: {len(todo)} shots in {el/60:.1f} min "
           f"({len(todo)/max(el,1e-9):.1f} shot/s)")
@@ -224,9 +263,19 @@ def main():
         print(f"  {len(shots)} of {len(requested)} requested shots are in {src}"
               f" ({skipped} not annotated -- no plasma, no OMAHA record, or a "
               f"failed flat-top)")
+    meta = source_meta(src, "annotation" if a.annotation else "ladder",
+                       a.tag.upper(), a.use_alts, not a.no_glitch,
+                       a.min_timestamps)
+    if meta["source_kind"] == "annotation" and meta["annotation"] is None:
+        print(f"  note: no .json beside {src} (made before sidecars existed); "
+              f"n and threshold will not travel with the features")
+    legacy = store.check_meta(meta, META_KEYS)
+    if legacy:
+        print(f"  WARNING {legacy} chunks in {store.path} predate the checksum "
+              f"and cannot be verified against {src}")
     run(shots, windows, events, a.tag.upper(), store, a.workers,
         a.min_timestamps, a.use_alts, not a.no_glitch, a.chunk_size,
-        a.report_every)
+        a.report_every, meta)
 
     s = store.summary()
     print(f"  store: {s['chunks']} chunks, {s['shots']} shots, "

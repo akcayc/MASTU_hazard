@@ -25,6 +25,11 @@ ambiguity in the DIII-D original does not arise.
 
     python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \\
         --out merged.pickle
+
+Both pickles must come from the same annotation: their `provenance` checksums
+(written by extract_parallel --consolidate) are compared and a mismatch is a
+hard error, since the two trees would then be chopped at different events.
+The provenance of each is carried into the merged table.
 """
 
 import argparse
@@ -43,6 +48,25 @@ def load_records(path):
     with open(path, "rb") as fh:
         d = pickle.load(fh)
     return d["records"] if isinstance(d, dict) and "records" in d else d
+
+
+def load_provenance(path):
+    """The pickle's `provenance` (see extract_parallel), or None if it has none."""
+    with open(path, "rb") as fh:
+        d = pickle.load(fh)
+    return d.get("provenance") if isinstance(d, dict) else None
+
+
+def check_same_annotation(p1, p2):
+    """Hard error if both provenances name an annotation and they differ."""
+    if p1 is None or p2 is None:
+        return False
+    if p1.get("sha256") != p2.get("sha256"):
+        raise SystemExit(
+            "primary and secondary were harvested from different files:\n"
+            f"  primary   {p1.get('source')}\n  secondary {p2.get('source')}\n"
+            "  the two trees would be chopped at different events")
+    return True
 
 
 def create_index(records):
@@ -228,6 +252,15 @@ def main():
 
     T1 = load_records(a.primary)
     T2 = load_records(a.secondary) if a.secondary else []
+    prov1 = load_provenance(a.primary)
+    prov2 = load_provenance(a.secondary) if a.secondary else None
+    if a.secondary and not check_same_annotation(prov1, prov2):
+        print("  note: provenance missing from one or both pickles (harvested "
+              "before checksums); same annotation NOT verified")
+    ann = (prov1 or {}).get("annotation") or {}
+    if ann:
+        print(f"  annotation: n={ann.get('n')}, threshold {ann.get('threshold')} G "
+              f"({ann.get('events')} events / {ann.get('shots')} shots)")
     if not T1:
         raise SystemExit("primary is empty")
     print(f"  primary   {a.primary}: {len(T1)} shots, tag {T1[0]['tag']}")
@@ -255,7 +288,8 @@ def main():
             "Xnames": names, "tag1": T1[0]["tag"],
             "tag2": T2[0]["tag"] if T2 else None, "dt": dt,
             "merge_delta": delta, "event_delta": ev,
-            "dropped_columns": list(a.drop)}
+            "dropped_columns": list(a.drop),
+            "provenance": {"primary": prov1, "secondary": prov2}}
     with open(a.out, "wb") as fh:
         pickle.dump(data, fh, protocol=pickle.HIGHEST_PROTOCOL)
 

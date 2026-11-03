@@ -21,15 +21,22 @@ With no locked-mode detector, tlm is always NaN and ievent is 0 or 1.  The
 schema keeps the column so the LM branch can be added without a format change.
 
     python make_annotation.py rm_ladder.csv --threshold 0.0137 --out joint.csv
-        -> writes joint_threshold0.0137.csv
+        -> writes joint_n1_threshold0.0137.csv and joint_n1_threshold0.0137.json
 
-The threshold actually applied (the ladder column it snaps to, 5 significant
-digits like MATLAB's num2str) is appended to the --out name, since nothing
-inside the CSV records it.
+The mode number (the ladder's whichn) and the threshold actually applied (the
+ladder column it snaps to, 5 significant digits like MATLAB's num2str) are
+appended to the --out name, since nothing inside the CSV records them.  The
+.json beside it records how the file was made -- ladder, n, threshold, window
+start, git commit -- and the summary printed below.  extract_parallel carries
+it into the feature pickles, so a model can always say which annotation it
+was trained on.
 """
 
 import argparse
+import datetime
+import json
 import os
+import subprocess
 import numpy as np
 import pandas as pd
 
@@ -48,10 +55,40 @@ def pick_column(df, threshold):
     return cols[i], float(lv[i])
 
 
-def threshold_path(out, threshold):
-    """joint.csv, 0.0137 -> joint_threshold0.0137.csv"""
+def threshold_path(out, threshold, n=None):
+    """joint.csv, 0.0137, 1 -> joint_n1_threshold0.0137.csv"""
     root, ext = os.path.splitext(out)
-    return f"{root}_threshold{threshold:.5g}{ext or '.csv'}"
+    tag = f"_n{n}" if n is not None else ""
+    return f"{root}{tag}_threshold{threshold:.5g}{ext or '.csv'}"
+
+
+def sidecar_path(csv_path):
+    """joint_n1_threshold0.0137.csv -> joint_n1_threshold0.0137.json"""
+    return os.path.splitext(csv_path)[0] + ".json"
+
+
+def mode_number(df):
+    """The ladder's |n|, from its whichn column; None for a ladder without one."""
+    if "whichn" not in df.columns:
+        return None
+    ns = np.unique(df["whichn"].dropna().astype(int))
+    if ns.size != 1:
+        raise SystemExit(f"ladder mixes mode numbers {ns.tolist()} in whichn")
+    return int(ns[0])
+
+
+def git_commit():
+    """Short commit of this repository, '+dirty' if it has local changes."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        c = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+        d = subprocess.run(["git", "-C", here, "status", "--porcelain",
+                            "--untracked-files=no"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+        return c + ("+dirty" if d else "")
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 def build(df, col, eq_start, fa_col=None, co_col=None, h_cols=None):
@@ -118,7 +155,10 @@ def main():
     if ann.empty:
         raise SystemExit("no usable shots")
     ann = ann.sort_values("shot")
-    out = threshold_path(a.out, lv)
+    n = mode_number(df)
+    if n is None:
+        print("  note: ladder has no whichn column; n is left out of the name")
+    out = threshold_path(a.out, lv, n)
     # the first seven columns are the format extract_features reads; those
     # that follow are extra and are ignored by anything that does not want them
     ann.to_csv(out, index=False,
@@ -155,6 +195,20 @@ def main():
     print(f"\n  at a 5.03 ms equilibrium cadence this is roughly "
           f"{int(dwell / 5.025e-3)} rows, base rate E/N ~ "
           f"{E / max(dwell / 5.025e-3, 1):.2e}")
+
+    meta = {"ladder": os.path.abspath(a.ladder), "n": n,
+            "threshold_requested": a.threshold, "threshold_column": col,
+            "threshold": lv, "eq_start": a.eq_start,
+            "shots": N, "events": E, "censored": N - E,
+            "skipped": len(skipped), "events_before_eq": n_before_eq,
+            "exposure_s": round(dwell, 4),
+            "created": datetime.datetime.now().isoformat(timespec="seconds"),
+            "git": git_commit()}
+    with open(sidecar_path(out), "w") as fh:
+        json.dump(meta, fh, indent=2)
+        fh.write("\n")
+    print(f"  sidecar {sidecar_path(out)}")
+    # run-study.sh reads the CSV path from this line, so it stays last
     print(f"  wrote {out}")
     return 0
 

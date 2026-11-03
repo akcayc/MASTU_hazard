@@ -63,7 +63,7 @@ def main():
         with open(out, "rb") as fh:
             m = pickle.load(fh)
         check("consolidate writes the extract_features shape",
-              n == 4 and set(m) == {"records", "dropped", "tag"})
+              n == 4 and set(m) == {"records", "dropped", "tag", "provenance"})
     finally:
         shutil.rmtree(d, ignore_errors=True)
     return 0 if ok else 1
