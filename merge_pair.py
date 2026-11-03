@@ -27,7 +27,7 @@ ambiguity in the DIII-D original does not arise.
         --out merged.pickle
 
 Both pickles must come from the same annotation: their `provenance` checksums
-(written by extract_parallel --consolidate) are compared and a mismatch is a
+(written when extract_parallel consolidates) are compared and a mismatch is a
 hard error, since the two trees would then be chopped at different events.
 The provenance of each is carried into the merged table.
 """

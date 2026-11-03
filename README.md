@@ -93,11 +93,9 @@ python plot_ladder.py rm_ladder.csv --out scan        # figures
 python make_annotation.py rm_ladder.csv --threshold <knee> --out joint.csv
                        # writes joint_n<n>_threshold<value>.csv and .json
 python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
-    --tag EPM --store harvest_EPM --workers 8         # features
-python extract_parallel.py --store harvest_EPM --consolidate feat_EPM.pickle
+    --tag EPM --store harvest_EPM --workers 8 --out feat_EPM.pickle  # features
 python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
-    --tag EPQ --store harvest_EPQ --workers 8
-python extract_parallel.py --store harvest_EPQ --consolidate feat_EPQ.pickle
+    --tag EPQ --store harvest_EPQ --workers 8 --out feat_EPQ.pickle
 python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \
     --out merged.pickle                               # the survival table
 ```
@@ -119,8 +117,8 @@ pickles, e.g. `47000_52000/n2_t0.003/`. Three things keep them apart:
   extraction options into every chunk. Resuming into a store made from a
   different annotation, or with different options, is a hard error: otherwise
   the shots already there would be skipped and keep the old chop and label.
-  `--consolidate` copies that record, with the `.json`, into the pickle as
-  `provenance`.
+  Consolidating (`--out`, or `--consolidate` alone) copies that record, with
+  the `.json`, into the pickle as `provenance`.
 - `merge_pair` refuses EPM and EPQ pickles with different checksums, prints
   the annotation's n and threshold, and stores both provenances in
   `merged.pickle`.

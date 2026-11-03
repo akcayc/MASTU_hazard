@@ -9,8 +9,8 @@ A store belongs to ONE annotation.  Every chunk records the annotation's
 sha256 checksum, the tag and the extraction options; resuming into a store
 built from anything else is a hard error, since the shots already in it would
 otherwise be skipped and keep the old chop and label without a word.
---consolidate copies that record, with the annotation's .json sidecar, into the
-pickle as `provenance`.
+Consolidating (--out or --consolidate) copies that record, with the
+annotation's .json sidecar, into the pickle as `provenance`.
 
 Two pyuda notes:
   * Each worker gets its OWN client, via threading.local.  pyuda.Client is not
@@ -19,11 +19,14 @@ Two pyuda notes:
     past that you are only queueing on the server.
 
 Results are written through checkpoint.ChunkStore, so a run that dies resumes
-where it stopped.
+where it stopped.  --out consolidates the store into one pickle when the run
+finishes; a run that dies writes no pickle, and rerunning the same command
+resumes and then writes it.
 
     python extract_parallel.py --annotation joint.csv --tag EPM \
-        --store harvest_EPM --workers 8
-    python extract_parallel.py --store harvest_EPM --consolidate feat_EPM.pickle
+        --store harvest_EPM --workers 8 --out feat_EPM.pickle
+
+--consolidate alone does the last step for an existing store.
 
 Use --annotation.  It chops each shot at tevent, which is mandatory: the model
 must never see a row from after the event.  Downstream, table_stack labels the
@@ -207,6 +210,8 @@ def main():
     p.add_argument("--min-timestamps", type=int, default=5)
     p.add_argument("--use-alts", action="store_true")
     p.add_argument("--no-glitch", action="store_true")
+    p.add_argument("--out", help="consolidate the store into this pickle when "
+                                 "the harvest finishes")
     p.add_argument("--consolidate", help="merge the store into one pickle and exit")
     p.add_argument("--status", action="store_true", help="report the store and exit")
     a = p.parse_args()
@@ -280,8 +285,12 @@ def main():
     s = store.summary()
     print(f"  store: {s['chunks']} chunks, {s['shots']} shots, "
           f"{s['bytes']/1e6:.1f} MB")
-    print(f"  consolidate with:  python extract_parallel.py --store {a.store} "
-          f"--consolidate feat_{a.tag.upper()}.pickle")
+    if a.out:
+        n, nd = CP.consolidate(store, a.out)
+        print(f"  {n} records, {nd} dropped -> {a.out}")
+    else:
+        print(f"  consolidate with:  python extract_parallel.py --store {a.store} "
+              f"--consolidate feat_{a.tag.upper()}.pickle")
     return 0
 
 

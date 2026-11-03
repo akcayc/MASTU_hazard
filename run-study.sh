@@ -185,8 +185,7 @@ harvest () {                      # $1 = EPM | EPQ
     return
   fi
   python extract_parallel.py --annotation "$joint" --tag "$tag" \
-    --store "$store" --workers "$WORKERS"
-  python extract_parallel.py --store "$store" --consolidate "$out"
+    --store "$store" --workers "$WORKERS" --out "$out"
 }
 
 echo "[4/5] feature harvest (EPM, EPQ)"
