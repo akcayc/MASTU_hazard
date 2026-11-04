@@ -50,6 +50,14 @@ def main():
     check(f"beats the base rate on every held-out fold (gain {gain.mean():.2e}/row)",
           np.all(gain > 0))
     check("every row predicted out of fold", np.all(np.isfinite(oof)))
+    # the stored booster reproduces the out-of-fold predictions it made
+    f0 = folds[0]
+    te = np.flatnonzero(~np.isin(S, f0["train_shots"]))
+    p_re = HM.load_model(f0["model"]).predict(HM.xgb.DMatrix(X[te]))
+    check("stored fold model reproduces its oof predictions",
+          np.allclose(p_re, oof[te, 0], rtol=1e-6))
+    check("train_shots and held-out shots are disjoint",
+          not np.intersect1d(f0["train_shots"], S[te]).size)
     summ = HM.summarize(folds, names, Y, None)
     top = max(summ["gain_share"], key=summ["gain_share"].get)
     check(f"x0 ranked first (got {top})", top == "x0")

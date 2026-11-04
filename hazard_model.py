@@ -103,6 +103,13 @@ def shot_folds(S, K, rng):
     return [np.flatnonzero(np.isin(S, g)) for g in groups]
 
 
+def load_model(raw):
+    """A fold record's `model` bytes back to a Booster."""
+    bst = xgb.Booster()
+    bst.load_model(bytearray(raw))
+    return bst
+
+
 def mean_llikl(y, p):
     p = np.clip(p, EPS, 1 - EPS)
     return float(np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
@@ -132,6 +139,8 @@ def evaluate(X, Y, S, params, outer_k, inner_k, repeats, max_rounds, rng,
 
     Returns the per-fold records and the out-of-fold predictions, one column
     per repeat: every row is predicted by a model that never saw its shot.
+    Each record carries its booster (`model`, xgboost raw bytes; see
+    load_model) and the shots it was fitted on (`train_shots`).
     """
     folds, oof = [], np.full((Y.size, repeats), np.nan)
     for b in range(repeats):
@@ -149,7 +158,11 @@ def evaluate(X, Y, S, params, outer_k, inner_k, repeats, max_rounds, rng,
                    "llikl": mean_llikl(Y[te], p),
                    "llikl0": mean_llikl(Y[te], np.full(te.size, p0)),
                    "gain": bst.get_score(importance_type="gain"),
-                   "seconds": time.time() - t0}
+                   "seconds": time.time() - t0,
+                   # for inference: the booster, and the shots it must not
+                   # be scored on (DIII-D's model_keys)
+                   "model": bytes(bst.save_raw()),
+                   "train_shots": np.unique(S[tr])}
             folds.append(rec)
             if verbose:
                 warn = "  <-- hit max rounds" if rounds >= max_rounds else ""
@@ -245,6 +258,7 @@ def main():
             pickle.dump({"folds": folds, "oof": oof, "Y": Y, "S": S, "T": T,
                          "Xnames": names, "params": params, "args": vars(a),
                          "summary": summ, "provenance": d.get("provenance"),
+                         "dt": d.get("dt"), "tag": d.get("tag1"),
                          "table": path, "xgboost": xgb.__version__}, fh,
                         protocol=pickle.HIGHEST_PROTOCOL)
         print(f"\n  wrote {a.out}")

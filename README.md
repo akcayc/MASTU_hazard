@@ -42,12 +42,14 @@ recomputation over the database.
 | `extract_features.py` | EPM/EPQ descriptor extraction; `--probe` checks node availability |
 | `extract_parallel.py` | Threaded, resumable driver for the above |
 | `hazard_model.py` | XGBoost discrete-time hazard model on `feat_EPM.pickle` or `merged.pickle`; shot-respecting CV |
+| `hazard_predict.py` | Held-out diagnostics of a fitted model: calibration, aligned hazard, shot separation, per-shot traces |
+| `feature_diagnostics.py` | Box plots, log-count histograms and a quantile table of every feature, against DIII-D's limits |
 | `checkpoint.py` | Chunked append-only store; atomic writes, resume on restart |
 | `epm_nodes.py` | MAST-U node map, DIII-D feature -> EPM path |
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite, 11 modules; runs without Freya |
+| `tests/` | Offline test suite, 12 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two
@@ -98,6 +100,7 @@ python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
 python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
     --tag EPQ --store harvest_EPQ --workers 8 --out feat_EPQ.pickle
 python hazard_model.py --features feat_EPM.pickle --out hazard_EPM.pickle
+python hazard_predict.py --pooled hazard_EPM.pickle --outdir pred_EPM
 python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \
     --out merged.pickle                               # paired analysis only
 ```
@@ -686,14 +689,48 @@ survival likelihood and p(x) = h(x)·dt.
 
 The results pickle holds every fold, the out-of-fold predictions (each row
 predicted by a model that never saw its shot), gain importances, the
-parameters and the table's provenance.
+parameters and the table's provenance. Each fold also keeps its booster
+(`model`, raw bytes; `hazard_model.load_model`) and the shots it was trained
+on (`train_shots`, DIII-D's `model_keys`), for scoring shots later.
+
+## Diagnosing a fit: `hazard_predict.py`
+
+```bash
+python hazard_predict.py --pooled hazard_EPM.pickle --outdir pred_EPM --sample 3
+```
+
+Everything is computed from the stored out-of-fold predictions, so it is a
+held-out test and needs no refit. Four figures and a printout:
+
+- **calibration:** rows in 10 equal-count bins of predicted p; mean p against
+  the observed onset fraction, with 68% Wilson intervals; total expected vs
+  observed; Hosmer-Lemeshow.
+- **aligned:** median and IQR of h = p/dt against time before onset (event
+  shots) and before the last slice (censored shots).
+- **separation:** peak h per shot, event vs censored, and the AUC.
+- **shots:** h(t) and S(t) for `--shots`, or `--sample N` random shots of each kind.
+
+`docs/hazard_calibration.tex` explains out-of-fold predictions and the
+calibration construction step by step.
+
+## Feature distributions: `feature_diagnostics.py`
+
+```bash
+python feature_diagnostics.py --features feat_EPM.pickle --outdir diag_EPM
+```
+
+For choosing screening limits. Box plots (all rows vs event rows),
+log-count histograms over each feature's full range, and a table of NaN/inf
+counts and quantiles, with the rows DIII-D's limits (`tabular_limits.py`)
+would remove. chisq and error are included.
 
 ## Not yet written
 
 Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectral
 detector cannot see a DC island, and the 1 kHz band floor excludes one by
-construction); screening limits re-derived for an ST; calibration, SHAP and
-feature-elimination for the hazard model.
+construction); screening limits re-derived for an ST; SHAP and
+feature-elimination for the hazard model; scoring
+new shots with the stored fold models.
 
 EPQ really is the better-constrained tree — `compare_trees.py` confirms it uses
 constraints EPM does not — so the EFIT01/EFIT02 analogy holds and the
