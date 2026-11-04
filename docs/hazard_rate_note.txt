@@ -1,0 +1,66 @@
+Hazard rate: p/dt should be -ln(1-p)/dt
+=======================================
+
+The problem
+-----------
+The model's p is the probability of an event WITHIN ONE SLICE of duration dt.
+A hazard rate h gives survival exp(-h*dt) across that slice, so
+
+    p = 1 - exp(-h*dt)      =>      h = -ln(1 - p) / dt
+
+Four places divide p by dt instead, which treats a probability as if it were
+already a rate:
+
+    hazard_predict.py:156     hs[ev].append(p[ix] / dt)
+    hazard_predict.py:218     peak[...].append((p[ix] / dt).max())
+    hazard_predict.py:253     H = oof[ix] / dt
+    hazard_model.py:187       p0 / dt
+
+
+The fix
+-------
+    -np.log1p(-p) / dt
+
+log1p rather than np.log(1 - p): p is around 1e-3 and the naive form loses
+precision there.
+
+
+So this is worth fixing only if measured p is large.  One line settles it:
+
+    python -c "
+    import pickle, numpy as np
+    d = pickle.load(open('hazard_EPM.pickle','rb'))
+    p = d['oof'][np.isfinite(d['oof'])]
+    for q in (50, 90, 99, 99.9, 100):
+        v = np.percentile(p, q)
+        print('p%-6s = %.4f   err in h = %+.2f%%'
+              % (q, v, 100*(v / -np.log1p(-v) - 1)))
+    "
+
+If the top percentile is around 1e-2, leave it alone.
+
+
+Where it would bite, if it does
+-------------------------------
+:156  aligned()      mean hazard vs time-to-event.  p rises as the event
+                     approaches, so the understatement grows along the ramp
+                     and flattens the pre-event rise.  This is the one that
+                     would distort a physics conclusion rather than a number.
+
+:218  separation()   takes the per-shot max, where p is largest.  Note the
+                     AUC is UNAFFECTED: -ln(1-p) is strictly increasing, so
+                     ranks and the argmax slice are unchanged.  Only the
+                     printed peak hazard values would be wrong.
+
+:253  plot_shots()   per-shot trace, and any cumulative H built from it.
+                     Understating h overstates survival exp(-H).
+
+:187  summarize()    p0/dt at the base rate: 0.15 % off.  Cosmetic.
+
+
+One thing to keep separate
+--------------------------
+The calibration diagnostic checks p against the observed rate.  It says
+nothing about the p -> h conversion, because that conversion is not a
+modelling claim, it is arithmetic.  A clean Hosmer-Lemeshow and a wrong
+hazard are compatible.
