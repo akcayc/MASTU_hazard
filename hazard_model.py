@@ -26,9 +26,13 @@ What carries over from DIII-D, and what does not:
     is by shot, never by row.  A shot is never on both sides of a split.
   * Booster settings: fdp-run-study-xgb.sh's (depth 6, eta 0.10, lambda 0.010,
     min_child_weight 5), hist trees.
+  * Calibration is in hazard_predict.py, and goes further than DIII-D's:
+    equal-count bins of predicted p with a binomial interval on each observed
+    rate, calibration-in-the-large (events observed against sum of p), and a
+    Hosmer-Lemeshow statistic against its reference distribution.  DIII-D
+    scattered the binned rates against a reference curve and read it by eye.
   * Not ported yet: the screening limits (STANDARD_FIXED_LIMITS are DIII-D
-    values, and an ST needs its own), calibration plots, SHAP, elimination
-    paths.
+    values, and an ST needs its own), SHAP, elimination paths.
 
 Rows: EPM alone, those with every feature finite (merge_pair's usable1).  The
 event ledger merge_pair prints says how many events that costs.
