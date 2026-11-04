@@ -4,19 +4,26 @@
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,decorations.pathreplacing,calc}
+\usetikzlibrary{arrows.meta,decorations.pathreplacing,calc,fit,positioning,backgrounds}
 \setlength{\parskip}{0.5em}\setlength{\parindent}{0pt}
-\title{Out-of-fold predictions and calibration\\of the discrete-time hazard model}
+\title{The discrete-time hazard model:\\training layers, out-of-fold predictions and calibration}
 \author{MASTU\_hazard notes}
 \date{}
 \begin{document}
+\sloppy
 \maketitle
 
-This note explains what \texttt{hazard\_predict.py --pooled} checks and why the
-checks are valid. It covers what a prediction means
-(\S\ref{sec:row}), where the predictions come from (\S\ref{sec:oof}), and the
-calibration check step by step (\S\ref{sec:cal}--\ref{sec:read}). The other two
-plots, the aligned hazard and the shot separation, are in \S\ref{sec:other}.
+This note covers four things:
+\begin{itemize}
+\item what a prediction means (\S\ref{sec:row});
+\item every layer of the training: tables, folds, repeats, which boosters are
+  grown and which are kept. It also compares this with Erik's DIII-D code
+  (\S\ref{sec:train});
+\item where the out-of-fold predictions come from (\S\ref{sec:oof});
+\item what \texttt{hazard\_predict.py --pooled} checks and why the checks are
+  valid: calibration step by step (\S\ref{sec:cal}--\ref{sec:read}), then the
+  aligned hazard and the shot separation (\S\ref{sec:other}).
+\end{itemize}
 
 %-----------------------------------------------------------------------------
 \section{What one prediction means}\label{sec:row}
@@ -60,16 +67,88 @@ variance is the sum of the conditional variances. Correlations between
 features do not enter.}
 
 %-----------------------------------------------------------------------------
-\section{\texttt{oof}: out-of-fold, not out-of-distribution}\label{sec:oof}
+\section{How the models are trained: every layer}\label{sec:train}
+
+This section lists \emph{everything} between the survival table and the
+\texttt{oof} column: which rows go in, how the shots are split, how many
+boosters get trained, and which ones are kept. The MAST-U port
+(\texttt{hazard\_model.py}) is described first. Erik's DIII-D code
+(\texttt{xgbDescriptorModel.py}, \texttt{xgb\_hazard\_common.py} and the
+\texttt{fdp-run-study-xgb*.sh} drivers) is compared in
+\S\ref{sec:d3dmodes}--\ref{sec:diff}.
+
+\subsection{The layers at a glance}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,
+  lay/.style={draw,rounded corners=2pt,align=left,text width=12.4cm,inner sep=4pt},
+  lab/.style={anchor=north west,align=left,inner sep=2pt}]
+  \node[lay,fill=blue!6] (l3) at (0,0)
+    {\textbf{Layer 3 -- inner CV on TRAIN only} (\texttt{xgb.cv}):
+     TRAIN's shots split into $k_{\text{in}}=3$ groups. Three boosters are grown
+     side by side, one tree per round each, each scored on its held-out third.
+     Growth stops when the mean held-out loss has not improved for 25 rounds.
+     Output: one number, $R$ = the round with the best mean held-out loss.
+     \emph{The three boosters are discarded.}};
+  \node[lay,fill=green!8,below=3pt of l3] (refit)
+    {\textbf{Refit}: one booster on \emph{all} of TRAIN for exactly $R$ rounds.
+     \emph{This is the fold's model.}};
+  \node[lay,fill=green!8,below=3pt of refit] (pred)
+    {\textbf{Predict} the TEST rows $\to$ their entries in \texttt{oof[:, b]};
+     score: test log-likelihood against the base rate.};
+  \node[lab] (t2) at ($(l3.north west)+(-0.3,0.75)$)
+    {\textbf{Layer 2 -- outer fold} $k=1\dots K$: shot group $G_k$ = TEST, the
+     other $K-1$ groups = TRAIN};
+  \begin{scope}[on background layer]
+    \node[draw,rounded corners=2pt,fill=red!6,fit=(t2)(l3)(pred),inner sep=5pt] (L2) {};
+  \end{scope}
+  \node[lab] (t1) at ($(L2.north west)+(-0.3,0.65)$)
+    {\textbf{Layer 1 -- repeat} $b=1\dots B$: a fresh random grouping of the shots};
+  \begin{scope}[on background layer]
+    \node[draw,rounded corners=2pt,fill=yellow!10,fit=(t1)(L2),inner sep=5pt] (L1) {};
+  \end{scope}
+  \node[lab] (t0) at ($(L1.north west)+(-0.3,0.65)$)
+    {\textbf{Layer 0 -- the table}: rows = slices, columns = features; fixed once};
+  \begin{scope}[on background layer]
+    \node[draw,rounded corners=2pt,fill=gray!8,fit=(t0)(L1),inner sep=5pt] {};
+  \end{scope}
+\end{tikzpicture}
+\end{center}
+
+\textbf{Counting.} Per outer fold, $k_{\text{in}}+1=4$ boosters are grown, and
+one is kept. Per run that is $B\times K$ kept models and
+$B\times K\times(k_{\text{in}}+1)$ grown ones. With the defaults ($B=1$, $K=8$,
+$k_{\text{in}}=3$) that is 8 kept and 32 grown.
+
+\subsection{Layer 0: the table}
+
+\texttt{merge\_pair.build\_table} stacks the per-shot records into rows (one
+row per EPM slice). \texttt{hazard\_model.load\_table} then makes three
+choices:
+\begin{itemize}
+\item \textbf{Columns.} The 27 DIII-D descriptors. \texttt{chisq} and
+  \texttt{error} are dropped: they measure reconstruction quality and are
+  meant for screening, not for the model. \texttt{--exclude} drops more.
+\item \textbf{Rows.} Only rows with every feature finite (\texttt{usable1}).
+  Nothing is screened by value yet. That is what \texttt{feature\_diagnostics}
+  is for.
+\item \textbf{Label.} $y=1$ if the annotation's \texttt{Y}$>0$ (rotating or
+  locked), otherwise $0$.
+\end{itemize}
+Every later layer sees exactly this table. The shot number $S_i$ of each row is
+carried along, because every split is made on $S$ and never on rows.
+
+\subsection{Layer 1 and 2: the outer split (where \texttt{oof} comes from)}\label{sec:oof}
 
 \textbf{oof} stands for \emph{out-of-fold}. It has nothing to do with OOD
 (out-of-distribution).
 
-\texttt{hazard\_model.py} splits the \emph{shots} into $K=8$ groups. For each
-group $k$ it trains a model on the other seven groups and predicts the rows of
-group $k$. After eight fits every row has exactly one prediction, made by a
-model that never saw any slice of that shot. The column of these predictions is
-\texttt{oof}.
+The unique shots are shuffled and cut into $K=8$ groups $G_1\dots G_8$. For
+each $k$, the rows of $G_k$ are TEST and all other rows are TRAIN. A model is
+built from TRAIN alone (Layer 3 plus the refit) and predicts TEST. After eight
+folds every row has exactly one prediction, made by a model that never saw any
+slice of that shot. That column is \texttt{oof}. The code asserts that the
+TRAIN and TEST shot sets are disjoint.
 
 \begin{center}
 \begin{tikzpicture}[x=1.2cm,y=0.55cm]
@@ -83,35 +162,241 @@ model that never saw any slice of that shot. The column of these predictions is
       \fi
       \draw[gray] (\j,-\k) rectangle ++(1,-0.8);
     }
-    \node[left] at (0,-\k-0.4) {\small fit $\k$};
+    \node[left] at (0,-\k-0.4) {\small fold \k};
   }
   \foreach \j in {0,...,7} \node[above] at (\j+0.5,0) {\small $G_\j$};
-  \node[right,align=left] at (8.2,-1.5) {\small\textcolor{blue!60}{train} (inner 3-fold\\ \small CV picks the rounds)};
-  \node[right,align=left] at (8.2,-4.5) {\small\textcolor{red!70}{predict}: these rows'\\ \small entries in \texttt{oof}};
+  \node[right,align=left] at (8.2,-1.5) {\small\textcolor{blue!60}{TRAIN} (Layer 3\\ \small picks the rounds)};
+  \node[right,align=left] at (8.2,-4.5) {\small\textcolor{red!70}{TEST}: these rows'\\ \small entries in \texttt{oof}};
 \end{tikzpicture}
 \end{center}
 
-\paragraph{Why oof predictions are needed.}
-A boosted tree scored on its own training rows looks better than it is, because
-it has partly memorised them. In particular, its predictions there are too
-extreme: too high on event rows, too low elsewhere. Calibration measured on
-training rows would therefore be meaningless. On oof rows every prediction is
-an honest test.
+\textbf{Why by shot.} Neighbouring slices of one shot are nearly identical
+(5\,ms apart). If they were split by row, a slice in TEST would have its
+twins in TRAIN, and the test score would measure memory, not prediction.
 
-\paragraph{Three things to keep in mind.}
+\textbf{Why oof at all.} A boosted tree scored on its own training rows looks
+better than it is, because it has partly memorised them. Its predictions there
+are too extreme: too high on event rows, too low elsewhere. Calibration
+(\S\ref{sec:cal}) on training rows would be meaningless.
+
+\textbf{Repeats} (\texttt{--repeats} $B$). The whole 8-fold split is redone
+with a fresh shuffle of the shots, which gives \texttt{oof} $B$ columns.
+Each shot then lands in different company each time, so the spread of the
+fold scores across repeats measures how much the result depends on which shots
+happened to share a group. \texttt{hazard\_predict} averages the $B$ columns.
+
+\textbf{What oof is not.}
+(i) It is stitched together from $K$ \emph{different} models. It grades the
+\emph{procedure}, not one model.
+(ii) The TEST shots come from the same campaign and the same annotation as the
+TRAIN shots, so it is not a distribution-shift test. Scoring another campaign
+with the stored models would be one.
+
+\subsection{Layer 3: what a ``round'' is, and how many to use}
+
+A boosted model is a sum of small regression trees acting on the log-odds:
+\[
+f(x) = f_0 + \eta\sum_{r=1}^{R} \mathrm{tree}_r(x),
+\qquad p(x) = \frac{1}{1+e^{-f(x)}} .
+\]
+\begin{itemize}
+\item $f_0$ is the starting point, i.e.\ the training base rate
+  (\S\ref{sec:base}).
+\item Each \emph{round} adds one tree, fitted to the current residuals (the
+  gradient and Hessian of the log-loss). $\eta=0.1$ shrinks each tree's step.
+\item More rounds fit the training rows ever better. At some point they start
+  fitting noise, and the loss on unseen shots goes back up.
+\end{itemize}
+$R$ is the one quantity tuned per fold, and it must be chosen \emph{without
+touching TEST}. Hence Layer 3:
 \begin{enumerate}
-\item \texttt{oof} is stitched together from eight \emph{different} models.
-  Calibration on \texttt{oof} grades the fitting procedure, i.e.\ what a model
-  trained this way does on unseen shots. It does not grade one particular
-  model.
-\item With \texttt{--repeats} $B>1$ the whole 8-fold split is redone with fresh
-  shot groupings, and \texttt{oof} has $B$ columns. \texttt{hazard\_predict}
-  averages them; their spread is the band in the per-shot traces.
-\item oof shots come from the \emph{same} campaign and the same annotation as
-  the training shots. This is not a distribution-shift test. Running the
-  stored fold models on another campaign would be (the per-shot mode, not yet
-  written).
+\item TRAIN's shots are split again, into 3 groups (\emph{inner} folds, also by
+  shot).
+\item \texttt{xgb.cv} grows three boosters in lock-step, each on two thirds of
+  TRAIN, and after every round records each one's log-loss on its held-out
+  third. The mean of the three is the validation curve.
+\item When that mean has not improved for 25 rounds, growth stops (\emph{early
+  stopping}). $R$ is the round where the mean was lowest; \texttt{xgb.cv}
+  returns the curve cut at $R$, so $R$ is its length.
+\item The three inner boosters have done their job and are thrown away.
+  \textbf{Refit}: one booster is grown on all of TRAIN for exactly $R$ rounds.
+  This is the fold's model, the one that predicts TEST and is stored in the
+  results pickle (\texttt{folds[j]["model"]}, with
+  \texttt{folds[j]["train\_shots"]}).
 \end{enumerate}
+The refit model has seen $3/2$ times more rows than each inner booster, so its
+best $R$ would be slightly larger. Using the inner $R$ is the standard,
+slightly conservative choice. \texttt{max\_rounds} (1000) is only a ceiling;
+\texttt{hazard\_model} warns if it is reached.
+
+\subsection{The booster settings, and what they mean here}
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+setting & value & meaning \\
+\midrule
+\texttt{max\_depth} & 6 & a tree can split at most 6 times along any path ($\le 64$ leaves)\\
+\texttt{eta} & 0.10 & each tree's contribution is shrunk by 10$\times$\\
+\texttt{min\_child\_weight} & 5 & a leaf needs Hessian sum $\sum p(1-p)\ge5$ (see below)\\
+\texttt{lambda} & 0.010 & L2 penalty on leaf values (nearly off)\\
+\texttt{alpha}, \texttt{gamma} & 0, 0 & no L1 penalty, no minimum split gain\\
+\texttt{subsample} & 1.0 & every round sees every TRAIN row\\
+\texttt{tree\_method} & hist & features binned into histograms (256 bins here, 512 on DIII-D)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{\texttt{min\_child\_weight} is the real regulariser here.} For the
+log-loss, a row's Hessian weight is $p(1-p)$. When onset is rare,
+$p\approx10^{-2}$, so each row weighs about $0.01$, and a leaf needs roughly
+$5/0.01=500$ slices behind it. At 5\,ms per slice that is 2.5\,s of plasma, or
+several shots. This is what stops a depth-6 tree from carving out a single
+shot. It also means that the effective constraint changes with the base rate:
+the same setting is tighter on a rarer label (e.g.\ the stricter-threshold
+$n=2$ annotation).
+
+\subsection{The starting point $f_0$ and the objective}\label{sec:base}
+
+Both codes use the per-row log-loss, which is the survival likelihood of
+\S\ref{sec:row}. Both start boosting from the TRAIN base rate
+$p_0=\sum y/N_{\text{TRAIN}}$:
+\begin{itemize}
+\item \textbf{DIII-D} supplies its own gradient $g=z-y$ and Hessian
+  $h=z(1-z)$ (\texttt{custom\_xgb\_grad\_hess}). With a custom objective
+  \texttt{base\_score} is in \emph{log-odds}, so it passes
+  $\log\frac{p_0}{1-p_0}$.
+\item \textbf{MAST-U} uses XGBoost's built-in \texttt{binary:logistic}, which
+  has the same $g$ and $h$. There \texttt{base\_score} is a
+  \emph{probability}, so it passes $p_0$. Passing the DIII-D value would have
+  started the model at $p\approx\log p_0<0$, i.e.\ an invalid value.
+\end{itemize}
+Each fold computes its own $p_0$ from its own TRAIN rows.
+
+\subsection{The score of a fold}
+
+For the TEST rows of fold $k$:
+\[
+\ell_k=\frac{1}{n_k}\sum_{i\in G_k}\bigl[y_i\log p_i+(1-y_i)\log(1-p_i)\bigr],
+\qquad
+\ell^{(0)}_k=\text{the same with } p_i\equiv p_0 \text{ (TRAIN base rate)} .
+\]
+$\ell_k-\ell^{(0)}_k>0$ means the model predicts unseen shots better than a
+constant rate. \texttt{hazard\_model} prints this per fold, the mean $\pm$
+standard deviation over folds, the gain per event (multiplied by rows/events),
+and $(\ell-\ell^{(0)})/(-\ell^{(0)})$, the fraction of the base-rate loss
+removed.
+
+\textbf{Shuffled-target control} (\texttt{--shuffle-targets}). $y$ is permuted
+over all rows before Layer 1, and everything else is run identically. The
+features then carry no information about the labels, so the gain must come out
+$\le0$. If it does not, something in the procedure is leaking. It is a separate
+run so that the real run's outputs stay untouched; Erik ran it as a separate
+\texttt{sbatch} job in the same way (the \texttt{-yshuf} tag).
+
+\subsection{What a run leaves behind}
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+object & size & what it is \\
+\midrule
+\texttt{oof} & $N\times B$ & held-out $p$ for every row, every repeat\\
+\texttt{folds} & $B\times K$ records & per fold: $R$, $p_0$, $\ell$, $\ell^{(0)}$, gain importances, model, \texttt{train\_shots}\\
+\texttt{Y, S, T} & $N$ & label, shot, time of each row (as fitted; shuffled if the control)\\
+\texttt{summary} & & gain shares, $\ell-\ell^{(0)}$ per fold\\
+\texttt{provenance}, \texttt{dt}, \texttt{params} & & annotation checksum/sidecar, cadence, settings\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+To score a shot that was used in training with the stored models, use only the
+models whose \texttt{train\_shots} exclude it. For any row there are exactly
+$B$ such models, one per repeat (DIII-D's \texttt{--require-allowed}).
+
+\subsection{Erik's DIII-D code: one program, several modes}\label{sec:d3dmodes}
+
+On DIII-D everything goes through \texttt{xgbDescriptorModel.py}, and a flag
+picks the \emph{mode}. All modes share Layer 0 and the same booster settings.
+They differ in what is repeated and what is kept.
+
+\textbf{Layer 0 on DIII-D.} Erik's table is always the merged EFIT01/EFIT02
+pair (\texttt{merge\_pair} here).
+\begin{enumerate}
+\item Rows are kept only if \emph{both} EFITs are finite
+  (\texttt{get\_complete\_subset}).
+\item Rows are kept only if \emph{both} pass the value limits
+  (\texttt{apply\_double\_screening} with \texttt{tabular\_limits}, which is
+  \texttt{fixed} by default).
+\item Then \texttt{--study-tag} picks X1 or X2 as the features.
+\end{enumerate}
+So the EFIT01 and EFIT02 models are fitted on \emph{identical rows}, and only
+the feature values differ. \texttt{chisq} and \texttt{error} are removed after
+screening, as here.
+
+\begin{center}\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{3.9cm}>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}p{8.9cm}}
+\toprule
+mode (flag) & driver: $B$, $K$, $k_{\text{in}}$ & what it does / keeps \\
+\midrule
+default (no flag) \newline \texttt{outer\_fold\_\allowbreak test\_sampler}
+ & -- & Layers 1--3 as above; keeps per-fold $\ell$, $\ell^{(0)}$, importances. No predictions, no models.\\[3pt]
+\texttt{--outer-evaluation} \newline \texttt{outer\_fold\_\allowbreak test\_preds}
+ & outerpreds.sh: 5, 12, 3 \newline pooled.sh: 100, 12, 3 \newline ensembles.sh: 10, 8, 3
+ & Layers 1--3; keeps \texttt{PREDS} (= our \texttt{oof}), optionally SHAP on TEST rows (\texttt{--outer-evaluation-shaps}), and the models plus their TRAIN shots (\texttt{--outer-evaluation-models}, \texttt{model\_keys}). \texttt{pooled.sh} keeps only the pooled loss, to get a distribution over 100 repeats. \texttt{ensembles.sh} saves the 80 models that \texttt{xgbEvalModelsForShot.py} uses.\\[3pt]
+\texttt{--feature-}\newline\texttt{elimination-path}
+ & xgb.sh: 15, 8, 3
+ & For each repeat and outer fold: fit on all features, drop the least important (by \texttt{weight}, the split count, unless \texttt{--importance-type}), refit, repeat until no feature is left. Test loss is logged at every step, but nothing is chosen on it. $15\times8\times27\approx3200$ fold models per EFIT, plus the \texttt{-yshuf} control.\\[3pt]
+\texttt{--full-table-model}
+ & -- & \emph{One} model on \emph{all} rows (inner CV by shot for $R$). Its calibration, partial-dependence, SHAP and per-shot plots are \textbf{in-sample}: these rows trained it.\\[3pt]
+\texttt{--hyperparameter-}\newline\texttt{search} $n$
+ & -- & $n$ random draws of the settings, each scored by inner CV on the full table. Rows are split \emph{not} by shot here; the results are printed but not summarised (a TODO in the code).\\[3pt]
+\texttt{--feature-distances}
+ & -- & One-feature models, then KL distances between their outputs: a redundancy map.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Where the MAST-U port differs from DIII-D}\label{sec:diff}
+
+\begin{center}\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{3.3cm}>{\raggedright\arraybackslash}p{6cm}>{\raggedright\arraybackslash}p{6cm}}
+\toprule
+ & DIII-D (\texttt{split\_and\_evaluate}) & MAST-U (\texttt{hazard\_model.fit}) \\
+\midrule
+outer folds & by shot & by shot \\
+\textbf{inner (early-stopping) folds}
+ & \textbf{by row}: \texttt{xgb.cv(nfold=$k$)} with no \texttt{folds=}; shot-respecting only in \texttt{--full-table-model}
+ & by shot \\
+rounds used & \texttt{argmin} of the curve $=R-1$\,\footnotemark & $R$ \\
+objective / $f_0$ & custom $g,h$; log-odds $f_0$ & built-in; probability $f_0$ (same model) \\
+rows & complete in both EFITs, double-screened & EPM finite only; no screening yet \\
+hist bins & 512 & 256 (XGBoost default) \\
+xgboost & 1.6.2 & 3.x \\
+calibration plot & 40 equal-\emph{width} bins in $f$ over its 1--99\% range, $E/C$ against $\log(1+e^{f})$ & 10 equal-\emph{count} bins in $p$, $E/n$ against $p$, Wilson intervals \\
+\bottomrule
+\end{tabular}
+\end{center}
+\footnotetext{\texttt{xgb.cv} with early stopping returns the curve cut at the
+best round, so \texttt{argmin} is its last index, $R-1$, and DIII-D refits one
+tree short. If the best round is the first one, it refits with zero trees,
+i.e.\ the base rate. This is harmless at $R\sim100$.}
+
+\textbf{The inner-fold difference matters.} With row-level inner folds, each
+inner validation third contains slices whose 5\,ms neighbours are in the
+inner training two thirds. The validation curve then keeps improving for longer
+than it would on unseen shots, so $R$ comes out too large and the fold models
+are overfit. The DIII-D \emph{outer} test is still honest, because TEST shots
+never enter Layer 3. So Erik's test scores are valid; they are just the
+scores of somewhat over-grown models. The likely symptom is calibration that is
+flatter than the diagonal (\S\ref{sec:read}). The port splits by shot at both
+levels.
+
+\textbf{The calibration references differ.} Erik compares the binned event
+fraction $E/C$ (a per-slice probability) with $\log(1+e^{f})=-\log(1-p)$, the
+cumulative hazard per slice $h\Delta t$ under a continuous-time reading. Here,
+$E/n$ is compared with $p$. The two agree when $p\ll1$, which covers nearly all
+rows, and differ at the top end, where $-\log(1-p)>p$.
 
 %-----------------------------------------------------------------------------
 \section{Calibration, step by step}\label{sec:cal}
