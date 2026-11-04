@@ -41,12 +41,13 @@ recomputation over the database.
 | `compare_trees.py` | Does EPQ use more constraints than EPM? |
 | `extract_features.py` | EPM/EPQ descriptor extraction; `--probe` checks node availability |
 | `extract_parallel.py` | Threaded, resumable driver for the above |
+| `hazard_model.py` | XGBoost discrete-time hazard model on `merged.pickle`; shot-respecting CV |
 | `checkpoint.py` | Chunked append-only store; atomic writes, resume on restart |
 | `epm_nodes.py` | MAST-U node map, DIII-D feature -> EPM path |
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite, 10 modules; runs without Freya |
+| `tests/` | Offline test suite, 11 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two
@@ -640,11 +641,47 @@ before the onset would be a false label.
 `error` and `chisq` are dropped from the model features by default — they are
 reconstruction quality, for screening only.
 
+## The hazard model: `hazard_model.py`
+
+```bash
+python merge_pair.py --primary feat_EPM.pickle --out merged_EPM.pickle
+python hazard_model.py --table merged_EPM.pickle --out hazard_EPM.pickle
+python hazard_model.py --table merged_EPM.pickle --shuffle-targets   # control
+```
+
+The port of `xgb_hazard_common.py`. Each row is an EPM slice and Y = 1 on the
+last pre-event slice, so a per-row logistic loss is the discrete-time
+survival likelihood and p(x) = h(x)·dt.
+
+- **Objective:** XGBoost's built-in `binary:logistic`. DIII-D's custom
+  gradient and Hessian (g = z − y, h = z(1 − z)) are the same thing.
+- **Anchoring:** boosting starts at the training base rate. With the built-in
+  objective `base_score` is a *probability*; DIII-D passes log-odds because
+  its objective is custom. Copying their line would anchor at the wrong rate.
+- **Folds by shot:** 8 outer test folds and 3 inner early-stopping folds,
+  both split by shot, so no shot is ever on both sides. `--repeats` reruns the
+  outer split with fresh shuffles (DIII-D used 15).
+- **Booster:** `fdp-run-study-xgb.sh`'s settings — depth 6, eta 0.10,
+  λ 0.010, min_child_weight 5, hist trees; each has a flag.
+- **Rows:** EPM only, every feature finite (`usable1`). Labelled events on a
+  row with a NaN feature are counted and left out.
+- **Score:** test log-likelihood per row against the base-rate model, per
+  fold, plus the gain per event and the fraction of the base-rate loss
+  removed. `--shuffle-targets` permutes Y over rows and should score at the
+  base.
+- **Not ported:** the screening limits (DIII-D's are tokamak values), so
+  nothing is screened yet.
+
+The results pickle holds every fold, the out-of-fold predictions (each row
+predicted by a model that never saw its shot), gain importances, the
+parameters and the table's provenance.
+
 ## Not yet written
 
 Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectral
 detector cannot see a DC island, and the 1 kHz band floor excludes one by
-construction); screening limits re-derived for an ST; the hazard model itself.
+construction); screening limits re-derived for an ST; calibration, SHAP and
+feature-elimination for the hazard model.
 
 EPQ really is the better-constrained tree — `compare_trees.py` confirms it uses
 constraints EPM does not — so the EFIT01/EFIT02 analogy holds and the

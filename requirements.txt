@@ -4,6 +4,7 @@ scipy
 pandas
 matplotlib
 xarray
+xgboost        # hazard_model.py; its offline test skips without it
 
 # Freya only -- MAST-U data access, not installable from PyPI.
 # pyuda
