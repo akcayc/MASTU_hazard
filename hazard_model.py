@@ -184,7 +184,7 @@ def summarize(folds, names, Y, dt):
     l0 = np.array([f["llikl0"] for f in folds])
     p0 = np.mean([f["base_rate"] for f in folds])
     print(f"\n  base rate {p0:.3e} per slice"
-          + (f" = {p0 / dt:.3f} /s at dt = {1e3 * dt:.3f} ms" if dt else ""))
+          + (f" = {-np.log1p(-p0) / dt:.3f} /s at dt = {1e3 * dt:.3f} ms" if dt else ""))
     print(f"  test llikl gain over base, per row:  {d.mean():.3e} "
           f"+/- {d.std(ddof=1) if d.size > 1 else 0:.1e}  "
           f"(> 0 in {int((d > 0).sum())}/{d.size} folds)")

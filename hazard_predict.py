@@ -7,7 +7,8 @@
 prediction of the one outer-fold model that never saw that row's shot (one
 column per --repeats), so everything here is a held-out test, no refit and no
 xgboost needed.  p is the probability of onset within the next slice; the
-hazard rate is h = p/dt.
+hazard rate is h = -ln(1 - p)/dt (constant rate within the slice, so
+p = 1 - exp(-h dt)), not p/dt, which runs low by about p/2.
 
   calibration   rows binned by predicted p (equal-count bins); per bin the
                 mean p against the observed event fraction, with a 68%
@@ -34,6 +35,13 @@ import pickle
 import numpy as np
 
 EPS = 1e-12
+
+
+def rate(p, dt):
+    """Per-slice probability p -> hazard rate h [1/s], h = -ln(1 - p)/dt.
+    Exact for a rate constant within the slice; log1p keeps precision at
+    small p, and the float64 cast avoids xgboost's float32 output."""
+    return -np.log1p(-np.asarray(p, np.float64)) / dt
 
 
 def load(path):
@@ -153,7 +161,7 @@ def aligned(p, Y, S, T, dt, window, step):
     for s, ix in shot_index(S).items():
         ev = Y[ix].any()
         ref = T[ix][np.flatnonzero(Y[ix])[-1]] if ev else T[ix][-1]
-        taus[ev].append(ref - T[ix]); hs[ev].append(p[ix] / dt)
+        taus[ev].append(ref - T[ix]); hs[ev].append(rate(p[ix], dt))
     for ev, key in ((True, "event"), (False, "censored")):
         if not taus[ev]:
             continue
@@ -183,7 +191,7 @@ def plot_aligned(al, base_h, path, title):
     a.set_yscale("log")
     a.invert_xaxis()
     a.set_xlabel("time before onset (event) / before last slice (censored)  [ms]")
-    a.set_ylabel("h = p/dt  [1/s]")
+    a.set_ylabel("h = -ln(1-p)/dt  [1/s]")
     a.set_title(title, fontsize=9)
     a.legend(fontsize=7)
     a.grid(True, which="both", alpha=0.3)
@@ -215,7 +223,7 @@ def auc(pos, neg):
 def separation(p, Y, S, dt):
     peak = {True: [], False: []}
     for s, ix in shot_index(S).items():
-        peak[bool(Y[ix].any())].append((p[ix] / dt).max())
+        peak[bool(Y[ix].any())].append(rate(p[ix], dt).max())
     pe, pc = np.array(peak[True]), np.array(peak[False])
     return pe, pc, auc(pe, pc)
 
@@ -250,7 +258,7 @@ def plot_shots(shots, oof, Y, S, T, dt, path, title):
                             squeeze=False)
     for a, s in zip(axs[:, 0], shots):
         ix = idx[s]
-        H = oof[ix] / dt
+        H = rate(oof[ix], dt)
         t = T[ix]
         a.step(t, np.nanmean(H, 1), where="post", color="C0", label="h")
         if H.shape[1] > 1:
@@ -307,7 +315,7 @@ def main():
              f"{int(Y.sum())} events, dt {1e3 * dt:.2f} ms")
     print(f"  {title}")
     print(f"  {oof.shape[1]} repeat(s); base rate {base:.3e}/slice = "
-          f"{base / dt:.3f}/s")
+          f"{rate(base, dt):.3f}/s")
     os.makedirs(a.outdir, exist_ok=True)
     out = lambda k: os.path.join(a.outdir, f"{tag}_{k}.png")  # noqa: E731
 
@@ -316,7 +324,7 @@ def main():
     plot_calibration(rows, p, out("calibration"), title)
 
     al = aligned(p, Y, S, T, dt, a.window, a.step or 2 * dt)
-    plot_aligned(al, base / dt, out("aligned"), title)
+    plot_aligned(al, rate(base, dt), out("aligned"), title)
     print("\n  ALIGNED median h [1/s]  (event | censored), by time before reference")
     for k in range(0, al["tau"].size, max(1, al["tau"].size // 8)):
         e = al.get("event", {}).get("median", [np.nan] * al["tau"].size)[k]

@@ -50,7 +50,7 @@ def main():
     al = HP.aligned(pp, Y, S, T, dt, 0.1, 2 * dt)
     e = al["event"]["median"]
     check("aligned: event hazard highest just before onset",
-          np.nanargmax(e) == 0 and np.allclose(al["censored"]["median"], 1e-3 / dt))
+          np.nanargmax(e) == 0 and np.allclose(al["censored"]["median"], HP.rate(1e-3, dt)))
     return 0 if ok else 1
 
 

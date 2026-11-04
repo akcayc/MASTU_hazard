@@ -705,7 +705,7 @@ held-out test and needs no refit. Four figures and a printout:
 - **calibration:** rows in 10 equal-count bins of predicted p; mean p against
   the observed onset fraction, with 68% Wilson intervals; total expected vs
   observed; Hosmer-Lemeshow.
-- **aligned:** median and IQR of h = p/dt against time before onset (event
+- **aligned:** median and IQR of h = −ln(1−p)/dt against time before onset (event
   shots) and before the last slice (censored shots).
 - **separation:** peak h per shot, event vs censored, and the AUC.
 - **shots:** h(t) and S(t) for `--shots`, or `--sample N` random shots of each kind.

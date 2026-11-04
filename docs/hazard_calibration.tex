@@ -38,10 +38,13 @@ The model returns, for each row, a number $p_i\in(0,1)$:
 \[
 p_i \;=\; \Pr\bigl(\text{onset in } (t_i,\,t_i+\Delta t] \;\big|\; \text{no onset by } t_i,\; x_i\bigr),
 \qquad
-h_i = p_i/\Delta t \;\;[\mathrm{s}^{-1}] .
+h_i = -\ln(1-p_i)/\Delta t \;\;[\mathrm{s}^{-1}] .
 \]
 Here $\Delta t$ is the slice cadence (the \texttt{dt} that \texttt{merge\_pair}
-measures, about 5\,ms on EPM). $h$ is the hazard rate. The probability that a
+measures, about 5\,ms on EPM). $h$ is the hazard rate: if it is constant
+within the slice, $1-p_i=e^{-h_i\Delta t}$. The shortcut $p_i/\Delta t$ is its
+first-order expansion and runs low by about $p_i/2$ (0.5\% at $p=0.01$, 5\% at
+$p=0.1$). The probability that a
 shot survives to time $t$ is
 \[
 S(t)=\prod_{t_i\le t}(1-p_i).
@@ -407,7 +410,7 @@ $p$ actually have onset:
 \[
 \Pr(y=1 \mid \hat p = q) = q \quad\text{for every } q .
 \]
-This is what entitles us to read $p/\Delta t$ as a rate in s$^{-1}$, and $S(t)$
+This is what entitles us to read $-\ln(1-p)/\Delta t$ as a rate in s$^{-1}$, and $S(t)$
 as a probability.
 
 \paragraph{Why binning is needed.}
