@@ -105,6 +105,12 @@ def main():
               prov is not None and prov["sha256"] == m1["sha256"]
               and prov["unverified_chunks"] == 0 and prov["annotation"]["n"] == 2)
 
+        # -- a finished harvest is recognised, a foreign pickle refused ----
+        check("no pickle yet: harvest", XP.finished_pickle(os.path.join(d, "x.pickle"), m1) is False)
+        check("pickle from the same annotation: done", XP.finished_pickle(out, m1))
+        check("pickle from another annotation: refused",
+              raises(lambda: XP.finished_pickle(out, m2)))
+
         # -- merge_pair compares the two trees -----------------------------
         check("same annotation passes", MP.check_same_annotation(m1, dict(m1, tag="EPQ")))
         check("different annotation refused",

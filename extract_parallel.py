@@ -20,13 +20,17 @@ Two pyuda notes:
 
 Results are written through checkpoint.ChunkStore, so a run that dies resumes
 where it stopped.  --out consolidates the store into one pickle when the run
-finishes; a run that dies writes no pickle, and rerunning the same command
-resumes and then writes it.
+finishes and then DELETES the store, once the pickle has been re-read and
+holds every shot in it: the pickle is the only copy kept.  A run that dies
+writes no pickle and keeps its store; rerunning the same command resumes.
+Rerunning after success finds the pickle, checks it came from the same
+annotation and options, and does nothing.
 
     python extract_parallel.py --annotation joint.csv --tag EPM \
         --store harvest_EPM --workers 8 --out feat_EPM.pickle
 
---consolidate alone does the last step for an existing store.
+--consolidate alone does the last step for an existing store.  --keep-store
+keeps the chunks in either case.
 
 Use --annotation.  It chops each shot at tevent, which is mandatory: the model
 must never see a row from after the event.  Downstream, table_stack labels the
@@ -45,6 +49,7 @@ import argparse
 import hashlib
 import json
 import os
+import pickle
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -130,6 +135,23 @@ def source_meta(path, kind, tag, use_alts, include_glitch, min_timestamps):
             "annotation": ann}
 
 
+def finished_pickle(out, meta):
+    """True if `out` exists and was harvested with this meta; hard error if
+    it exists from anything else.  False if there is no `out` yet."""
+    if not out or not os.path.isfile(out):
+        return False
+    with open(out, "rb") as fh:
+        prov = pickle.load(fh).get("provenance")
+    if prov is None:
+        raise SystemExit(f"{out} exists but carries no provenance (made before "
+                         f"checksums); move or delete it to re-harvest")
+    diff = {k: prov.get(k) for k in META_KEYS if prov.get(k) != meta.get(k)}
+    if diff:
+        raise SystemExit(f"{out} was harvested with different settings: {diff}\n"
+                         f"  use a different --out, or delete {out}")
+    return True
+
+
 def run(shots, windows, events, tag, store, workers, min_timestamps,
         use_alts, include_glitch, chunk_size, report_every, meta=None):
     todo = [s for s in shots if s not in store.done()]
@@ -188,6 +210,16 @@ def run(shots, windows, events, tag, store, workers, min_timestamps,
           f"({len(todo)/max(el,1e-9):.1f} shot/s)")
 
 
+def consolidate(store, out, keep_store):
+    if keep_store:
+        n, nd = CP.consolidate(store, out)
+        removed = False
+    else:
+        n, nd, removed = CP.consolidate_and_remove(store, out)
+    print(f"  {n} records, {nd} dropped -> {out}"
+          + (f"; store {store.path} deleted" if removed else ""))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--annotation", help="joint annotation CSV; chops each shot "
@@ -211,8 +243,11 @@ def main():
     p.add_argument("--use-alts", action="store_true")
     p.add_argument("--no-glitch", action="store_true")
     p.add_argument("--out", help="consolidate the store into this pickle when "
-                                 "the harvest finishes")
-    p.add_argument("--consolidate", help="merge the store into one pickle and exit")
+                                 "the harvest finishes, then delete the store")
+    p.add_argument("--consolidate", help="merge the store into one pickle, "
+                                         "delete the store, and exit")
+    p.add_argument("--keep-store", action="store_true",
+                   help="keep the chunks after consolidating")
     p.add_argument("--status", action="store_true", help="report the store and exit")
     a = p.parse_args()
 
@@ -228,8 +263,7 @@ def main():
         return 0
 
     if a.consolidate:
-        n, nd = CP.consolidate(store, a.consolidate)
-        print(f"  {n} records, {nd} dropped -> {a.consolidate}")
+        consolidate(store, a.consolidate, a.keep_store)
         return 0
 
     events = None
@@ -274,6 +308,10 @@ def main():
     if meta["source_kind"] == "annotation" and meta["annotation"] is None:
         print(f"  note: no .json beside {src} (made before sidecars existed); "
               f"n and threshold will not travel with the features")
+    if finished_pickle(a.out, meta) and not store.chunk_files():
+        print(f"  already harvested: {a.out} (same annotation and options)")
+        store.remove()                  # the empty directory just made
+        return 0
     legacy = store.check_meta(meta, META_KEYS)
     if legacy:
         print(f"  WARNING {legacy} chunks in {store.path} predate the checksum "
@@ -286,8 +324,7 @@ def main():
     print(f"  store: {s['chunks']} chunks, {s['shots']} shots, "
           f"{s['bytes']/1e6:.1f} MB")
     if a.out:
-        n, nd = CP.consolidate(store, a.out)
-        print(f"  {n} records, {nd} dropped -> {a.out}")
+        consolidate(store, a.out, a.keep_store)
     else:
         print(f"  consolidate with:  python extract_parallel.py --store {a.store} "
               f"--consolidate feat_{a.tag.upper()}.pickle")

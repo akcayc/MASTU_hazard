@@ -54,6 +54,23 @@ def main():
     top = max(summ["gain_share"], key=summ["gain_share"].get)
     check(f"x0 ranked first (got {top})", top == "x0")
 
+    # --features: per-shot records stacked by merge_pair.build_table
+    import os, pickle, tempfile
+    recs = []
+    for s_ in np.unique(S):
+        r = S == s_
+        t = 0.1 + 5.025e-3 * np.arange(r.sum())
+        recs.append({"shot": int(s_), "tag": "EPM", "time": t, "features": X[r],
+                     "feature-names": names, "event": int(Y[r][-1]), "tb": t[-1]})
+    path = os.path.join(tempfile.mkdtemp(), "feat_EPM.pickle")
+    with open(path, "wb") as fh:
+        pickle.dump({"records": recs, "dropped": {}, "tag": "EPM",
+                     "provenance": None}, fh)
+    Xf, Yf, Sf, _, nf, _, _ = HM.load_table(path, features=True)
+    check("--features stacks to the same table",
+          np.array_equal(Xf, X) and np.array_equal(Yf, Y) and np.array_equal(Sf, S)
+          and nf == names)
+
     rng = np.random.default_rng(2)
     Ys = rng.permutation(Y)
     folds, _ = HM.evaluate(X, Ys, S, par, 4, 3, 1, 300, rng, verbose=False)

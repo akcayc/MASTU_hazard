@@ -13,6 +13,7 @@ shorter.  Nothing here imports pyuda, so it is testable offline.
     ...
     store.append(records)          # every CHUNK_SIZE shots
     recs = store.load_all()        # when finished
+    consolidate_and_remove(store, "feat.pickle")   # one file; store deleted
 
 Each chunk can carry a `meta` dict saying what produced it (extract_parallel
 puts the annotation's checksum there).  check_meta() refuses to resume a store
@@ -128,6 +129,16 @@ class ChunkStore:
             dropped.pop(s, None)        # a later success clears an earlier failure
         return [by_shot[s] for s in sorted(by_shot)], dropped
 
+    def remove(self):
+        """Delete every chunk, then the directory if nothing else is in it."""
+        for f in self.chunk_files():
+            os.remove(os.path.join(self.path, f))
+        self._done = self._metas = None
+        try:
+            os.rmdir(self.path)
+        except OSError:
+            pass                        # something else lives there; leave it
+
     def summary(self):
         files = self.chunk_files()
         nbytes = sum(os.path.getsize(os.path.join(self.path, f)) for f in files)
@@ -148,9 +159,29 @@ def consolidate(store, out_path):
     prov = dict(known[-1]) if known else None
     if prov is not None:
         prov["unverified_chunks"] = len(metas) - len(known)
-    with open(out_path, "wb") as fh:
+    tmp = out_path + ".tmp"
+    with open(tmp, "wb") as fh:
         pickle.dump({"records": records, "dropped": dropped,
                      "tag": records[0]["tag"] if records else None,
                      "provenance": prov}, fh,
                     protocol=pickle.HIGHEST_PROTOCOL)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, out_path)           # atomic, as for chunks
     return len(records), len(dropped)
+
+
+def consolidate_and_remove(store, out_path):
+    """consolidate(), re-read the pickle, and delete the store only if every
+    shot in the store is in it.  Returns (records, dropped, removed)."""
+    n, nd = consolidate(store, out_path)
+    with open(out_path, "rb") as fh:
+        back = pickle.load(fh)
+    shots = {r["shot"] for r in back["records"]}
+    want = store.refresh()
+    if shots != want:
+        print(f"  store kept: {out_path} has {len(shots)} shots, the store "
+              f"{len(want)}")
+        return n, nd, False
+    store.remove()
+    return n, nd, True

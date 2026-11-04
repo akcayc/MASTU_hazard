@@ -6,7 +6,11 @@ equilibrium slice; Y = 1 only on the last pre-event slice of an event shot
 discrete-time survival likelihood: the model's p(x) is the probability of
 onset within the next slice, h(x)*dt.
 
-    python hazard_model.py --table merged.pickle --out hazard_EPM.pickle
+    python hazard_model.py --features feat_EPM.pickle --out hazard_EPM.pickle
+
+--features stacks the harvest pickle itself (merge_pair.build_table), so an
+EPM-only run needs no merged file; --table reads a merge_pair output instead,
+for when EPQ has been paired on.
 
 What carries over from DIII-D, and what does not:
 
@@ -41,6 +45,8 @@ import time
 
 import numpy as np
 
+import merge_pair as MP
+
 try:
     import xgboost as xgb
 except ImportError:
@@ -64,10 +70,17 @@ PARAMS = {
 EPS = 1e-12
 
 
-def load_table(path, exclude=()):
-    """X, Y, S (shot), T, feature names and the raw dict, EPM rows only."""
-    with open(path, "rb") as fh:
-        d = pickle.load(fh)
+def load_table(path, exclude=(), features=False):
+    """X, Y, S (shot), T, feature names and the table dict, EPM rows only.
+
+    `path` is a merge_pair output, or with features=True a harvest pickle
+    that is stacked here.
+    """
+    if features:
+        d = MP.build_table(path)
+    else:
+        with open(path, "rb") as fh:
+            d = pickle.load(fh)
     names = [n for n in d["Xnames"] if n not in exclude]
     for n in exclude:
         if n not in d["Xnames"]:
@@ -178,7 +191,10 @@ def summarize(folds, names, Y, dt):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--table", required=True, help="merge_pair output")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--features", help="harvest pickle (feat_EPM.pickle); "
+                                        "stacked here")
+    src.add_argument("--table", help="merge_pair output (merged.pickle)")
     p.add_argument("--out", help="results pickle")
     p.add_argument("--outer-k", type=int, default=8)
     p.add_argument("--inner-k", type=int, default=3)
@@ -201,10 +217,11 @@ def main():
         raise SystemExit("xgboost is not installed:  pip install --user xgboost")
     rng = np.random.default_rng(a.seed)
 
-    X, Y, S, T, names, d, lost = load_table(a.table, a.exclude)
+    path = a.features or a.table
+    X, Y, S, T, names, d, lost = load_table(path, a.exclude, bool(a.features))
     ann = ((d.get("provenance") or {}).get("primary") or {}).get("annotation") or {}
     print(f"  xgboost {xgb.__version__}")
-    print(f"  table {a.table}: tree {d.get('tag1')}"
+    print(f"  table {path}: tree {d.get('tag1')}"
           + (f", n={ann.get('n')}, threshold {ann.get('threshold')} G" if ann else
              ", annotation unknown (no provenance)"))
     print(f"  {Y.size} rows, {int(Y.sum())} events, {np.unique(S).size} shots, "
@@ -228,7 +245,7 @@ def main():
             pickle.dump({"folds": folds, "oof": oof, "Y": Y, "S": S, "T": T,
                          "Xnames": names, "params": params, "args": vars(a),
                          "summary": summ, "provenance": d.get("provenance"),
-                         "table": a.table, "xgboost": xgb.__version__}, fh,
+                         "table": path, "xgboost": xgb.__version__}, fh,
                         protocol=pickle.HIGHEST_PROTOCOL)
         print(f"\n  wrote {a.out}")
     return 0

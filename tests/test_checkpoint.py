@@ -5,7 +5,7 @@ import pickle
 import shutil
 import tempfile
 
-from checkpoint import ChunkStore, consolidate
+from checkpoint import ChunkStore, consolidate, consolidate_and_remove
 
 
 def main():
@@ -64,6 +64,17 @@ def main():
             m = pickle.load(fh)
         check("consolidate writes the extract_features shape",
               n == 4 and set(m) == {"records", "dropped", "tag", "provenance"})
+        check("consolidate leaves no temp file", not os.path.exists(out + ".tmp"))
+
+        # consolidate_and_remove: one copy kept, the store deleted
+        out2 = os.path.join(d, "feat.pickle")
+        n, nd, removed = consolidate_and_remove(ChunkStore(st2.path), out2)
+        with open(out2, "rb") as fh:
+            m2 = pickle.load(fh)
+        check("store deleted after a verified consolidation",
+              removed and not os.path.exists(st2.path))
+        check("the pickle holds every shot",
+              sorted(r["shot"] for r in m2["records"]) == [1, 2, 3, 4])
     finally:
         shutil.rmtree(d, ignore_errors=True)
     return 0 if ok else 1

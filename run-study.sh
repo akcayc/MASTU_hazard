@@ -205,6 +205,6 @@ echo
 echo "  $folder/"
 ls -1 "$folder" | sed 's/^/    /'
 echo
-echo "  Next: python merge_pair.py --primary $folder/feat_EPM.pickle \\"
-echo "            --secondary $folder/feat_EPQ.pickle --out $folder/merged.pickle"
-echo "  (omit --secondary to work on EPM alone).  Still to be written: the model."
+echo "  Next: python hazard_model.py --features $folder/feat_EPM.pickle \\"
+echo "            --out $folder/hazard_EPM.pickle"
+echo "  (merge_pair.py --secondary $folder/feat_EPQ.pickle is for the paired analysis)"

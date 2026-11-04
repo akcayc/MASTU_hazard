@@ -26,6 +26,9 @@ ambiguity in the DIII-D original does not arise.
     python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \\
         --out merged.pickle
 
+Only the paired EPM+EPQ analysis needs this file.  An EPM-only model reads
+feat_EPM.pickle itself (hazard_model.py --features), through build_table.
+
 Both pickles must come from the same annotation: their `provenance` checksums
 (written when extract_parallel consolidates) are compared and a mismatch is a
 hard error, since the two trees would then be chopped at different events.
@@ -235,6 +238,54 @@ def accounting(names, X1, X2, Y, has2, usable1, matched, verbose=True):
     return out
 
 
+def build_table(primary, secondary=None, drop=("error", "chisq"),
+                delta=None, event_delta=None):
+    """The survival table from one or two feature pickles, as a dict.
+
+    merge_pair writes it to disk for the paired analysis; hazard_model calls
+    it directly on feat_EPM.pickle, so an EPM-only run needs no merged file.
+    """
+    T1 = load_records(primary)
+    T2 = load_records(secondary) if secondary else []
+    prov1 = load_provenance(primary)
+    prov2 = load_provenance(secondary) if secondary else None
+    if secondary and not check_same_annotation(prov1, prov2):
+        print("  note: provenance missing from one or both pickles (harvested "
+              "before checksums); same annotation NOT verified")
+    ann = (prov1 or {}).get("annotation") or {}
+    if ann:
+        print(f"  annotation: n={ann.get('n')}, threshold {ann.get('threshold')} G "
+              f"({ann.get('events')} events / {ann.get('shots')} shots)")
+    if not T1:
+        raise SystemExit("primary is empty")
+    print(f"  primary   {primary}: {len(T1)} shots, tag {T1[0]['tag']}")
+    if secondary:
+        print(f"  secondary {secondary}: {len(T2)} shots, "
+              f"tag {T2[0]['tag'] if T2 else '--'}")
+    else:
+        print("  no secondary: primary alone, X2 is all NaN, nothing is paired")
+
+    dts = [np.median(np.diff(r["time"])) for r in T1 if len(r["time"]) > 1]
+    dt = float(np.median(dts)) if dts else EPM_NOMINAL_DT
+    tol = derived_tolerances(dt)
+    delta = delta if delta is not None else tol["merge_delta"]
+    ev = event_delta if event_delta is not None else tol["event_delta"]
+    print(f"  cadence dt = {1e3*dt:.3f} ms -> merge delta {1e3*delta:.2f} ms,"
+          f" event_delta {1e3*ev:.2f} ms")
+
+    T12 = create_merged_tables(T1, T2, delta)
+    names = [f for f in T1[0]["feature-names"] if f not in drop]
+    X1, X2, T, ID, Y, matched, has2, usable1 = table_stack(T12, names, ev)
+    acct = accounting(names, X1, X2, Y, has2, usable1, matched)
+    return {"X1": X1, "X2": X2, "T": T, "ID": ID, "Y": Y, "matched": matched,
+            "has_secondary": has2, "usable1": usable1, "accounting": acct,
+            "Xnames": names, "tag1": T1[0]["tag"],
+            "tag2": T2[0]["tag"] if T2 else None, "dt": dt,
+            "merge_delta": delta, "event_delta": ev,
+            "dropped_columns": list(drop),
+            "provenance": {"primary": prov1, "secondary": prov2}}
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--primary", required=True, help="EPM pickle")
@@ -250,46 +301,9 @@ def main():
                         "reconstruction quality, kept for screening only")
     a = p.parse_args()
 
-    T1 = load_records(a.primary)
-    T2 = load_records(a.secondary) if a.secondary else []
-    prov1 = load_provenance(a.primary)
-    prov2 = load_provenance(a.secondary) if a.secondary else None
-    if a.secondary and not check_same_annotation(prov1, prov2):
-        print("  note: provenance missing from one or both pickles (harvested "
-              "before checksums); same annotation NOT verified")
-    ann = (prov1 or {}).get("annotation") or {}
-    if ann:
-        print(f"  annotation: n={ann.get('n')}, threshold {ann.get('threshold')} G "
-              f"({ann.get('events')} events / {ann.get('shots')} shots)")
-    if not T1:
-        raise SystemExit("primary is empty")
-    print(f"  primary   {a.primary}: {len(T1)} shots, tag {T1[0]['tag']}")
-    if a.secondary:
-        print(f"  secondary {a.secondary}: {len(T2)} shots, "
-              f"tag {T2[0]['tag'] if T2 else '--'}")
-    else:
-        print("  no secondary: primary alone, X2 is all NaN, nothing is paired")
-
-    dts = [np.median(np.diff(r["time"])) for r in T1 if len(r["time"]) > 1]
-    dt = float(np.median(dts)) if dts else EPM_NOMINAL_DT
-    tol = derived_tolerances(dt)
-    delta = a.delta if a.delta is not None else tol["merge_delta"]
-    ev = a.event_delta if a.event_delta is not None else tol["event_delta"]
-    print(f"  cadence dt = {1e3*dt:.3f} ms -> merge delta {1e3*delta:.2f} ms,"
-          f" event_delta {1e3*ev:.2f} ms")
-
-    T12 = create_merged_tables(T1, T2, delta)
-    names = [f for f in T1[0]["feature-names"] if f not in a.drop]
-    X1, X2, T, ID, Y, matched, has2, usable1 = table_stack(T12, names, ev)
-    acct = accounting(names, X1, X2, Y, has2, usable1, matched)
-
-    data = {"X1": X1, "X2": X2, "T": T, "ID": ID, "Y": Y, "matched": matched,
-            "has_secondary": has2, "usable1": usable1, "accounting": acct,
-            "Xnames": names, "tag1": T1[0]["tag"],
-            "tag2": T2[0]["tag"] if T2 else None, "dt": dt,
-            "merge_delta": delta, "event_delta": ev,
-            "dropped_columns": list(a.drop),
-            "provenance": {"primary": prov1, "secondary": prov2}}
+    data = build_table(a.primary, a.secondary, a.drop, a.delta, a.event_delta)
+    Y, usable1, matched = data["Y"], data["usable1"], data["matched"]
+    names = data["Xnames"]
     with open(a.out, "wb") as fh:
         pickle.dump(data, fh, protocol=pickle.HIGHEST_PROTOCOL)
 

@@ -37,11 +37,11 @@ recomputation over the database.
 | `plot_mode_track.py` | One shot: gated spectrogram per \|n\| overlaid, with Fa tracks |
 | `check_n_leakage.py` | Two ladders, e.g. \|n\|=1 and 2: does the \|n\|=2 crossing sit at the \|n\|=1 Fa (leak) or twice it? |
 | `make_annotation.py` | Ladder CSV + a threshold -> the 7-column survival table |
-| `merge_pair.py` | EPQ onto EPM's time base, then flatten to the survival table |
+| `merge_pair.py` | Feature pickles -> survival table (`build_table`); EPQ onto EPM's time base for the paired analysis |
 | `compare_trees.py` | Does EPQ use more constraints than EPM? |
 | `extract_features.py` | EPM/EPQ descriptor extraction; `--probe` checks node availability |
 | `extract_parallel.py` | Threaded, resumable driver for the above |
-| `hazard_model.py` | XGBoost discrete-time hazard model on `merged.pickle`; shot-respecting CV |
+| `hazard_model.py` | XGBoost discrete-time hazard model on `feat_EPM.pickle` or `merged.pickle`; shot-respecting CV |
 | `checkpoint.py` | Chunked append-only store; atomic writes, resume on restart |
 | `epm_nodes.py` | MAST-U node map, DIII-D feature -> EPM path |
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
@@ -97,14 +97,24 @@ python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
     --tag EPM --store harvest_EPM --workers 8 --out feat_EPM.pickle  # features
 python extract_parallel.py --annotation joint_n<n>_threshold<value>.csv \
     --tag EPQ --store harvest_EPQ --workers 8 --out feat_EPQ.pickle
+python hazard_model.py --features feat_EPM.pickle --out hazard_EPM.pickle
 python merge_pair.py --primary feat_EPM.pickle --secondary feat_EPQ.pickle \
-    --out merged.pickle                               # the survival table
+    --out merged.pickle                               # paired analysis only
 ```
 
 The threshold enters only at `make_annotation`, so changing your mind means
 redoing from there, not the detector. `run-study.sh` covers everything up to
 the consolidated pickles; the merge is a separate call because it joins two
 study outputs.
+
+**One copy of the features.** Each tree keeps one file, `feat_<tag>.pickle`.
+The chunk store is scaffolding for a harvest that may die: `--out`
+consolidates it atomically, re-reads the pickle, and deletes the store once
+every shot is accounted for (`--keep-store` keeps it). Rerunning a finished
+harvest finds the pickle, checks its checksum and options, and does nothing;
+to retry dropped shots, delete the pickle and rerun. The survival table is
+not stored either: `hazard_model --features` stacks the pickle itself, and
+`merged.pickle` exists only when EPQ is paired on.
 
 **One annotation per folder.** Each annotation gets its own harvest stores and
 pickles, e.g. `47000_52000/n2_t0.003/`. Three things keep them apart:
@@ -121,8 +131,8 @@ pickles, e.g. `47000_52000/n2_t0.003/`. Three things keep them apart:
   Consolidating (`--out`, or `--consolidate` alone) copies that record, with
   the `.json`, into the pickle as `provenance`.
 - `merge_pair` refuses EPM and EPQ pickles with different checksums, prints
-  the annotation's n and threshold, and stores both provenances in
-  `merged.pickle`.
+  the annotation's n and threshold, and stores both provenances in the
+  table.
 
 Files made before this have no `.json` or checksum. They still work; the
 scripts say what they cannot verify.
@@ -200,8 +210,10 @@ run_master.main()
 
 make_annotation  ladder + threshold -> joint.csv (7 cols + fa_event, coh_event)
 extract_parallel analyze -> ChunkStore -> feat_EPM.pickle, feat_EPQ.pickle
+                 (store deleted once consolidated)
 merge_pair       EPQ onto EPM at dt/4; label the last pre-event row within 2*dt
-                 -> X1, X2, T, ID, Y, matched
+                 -> X1, X2, T, ID, Y, matched   (build_table; also used by
+                 hazard_model --features with no EPQ)
 ```
 
 ## What is still not right
@@ -644,9 +656,9 @@ reconstruction quality, for screening only.
 ## The hazard model: `hazard_model.py`
 
 ```bash
-python merge_pair.py --primary feat_EPM.pickle --out merged_EPM.pickle
-python hazard_model.py --table merged_EPM.pickle --out hazard_EPM.pickle
-python hazard_model.py --table merged_EPM.pickle --shuffle-targets   # control
+python hazard_model.py --features feat_EPM.pickle --out hazard_EPM.pickle
+python hazard_model.py --features feat_EPM.pickle --shuffle-targets   # control
+python hazard_model.py --table merged.pickle ...    # after pairing on EPQ
 ```
 
 The port of `xgb_hazard_common.py`. Each row is an EPM slice and Y = 1 on the
