@@ -113,8 +113,12 @@ def plot_box(X, ev, names, path, title):
         data = [x[fin], x[fin & ev]]
         if data[0].size:
             a.boxplot([d if d.size else [np.nan] for d in data],
-                      tick_labels=["all", "event"], widths=0.6,
+                      widths=0.6,
                       flierprops={"markersize": 2, "alpha": 0.3})
+            # labels set separately: boxplot's keyword is `labels` before
+            # matplotlib 3.9 and `tick_labels` after
+            a.set_xticks([1, 2])
+            a.set_xticklabels(["all", "event"])
         a.set_title(n, fontsize=9)
         a.tick_params(labelsize=7)
     for a in ax.flat[len(names):]:
