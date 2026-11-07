@@ -44,12 +44,13 @@ recomputation over the database.
 | `hazard_model.py` | XGBoost discrete-time hazard model on `feat_EPM.pickle` or `merged.pickle`; shot-respecting CV |
 | `hazard_predict.py` | Held-out diagnostics of a fitted model: calibration, aligned hazard, shot separation, per-shot traces |
 | `feature_diagnostics.py` | Box plots, log-count histograms and a quantile table of every feature, against DIII-D's limits |
+| `check_ane_thomson.py` | One shot: is ANE/DENSITY a line integral or a line average? Tested against Thomson via the path-length scaling |
 | `checkpoint.py` | Chunked append-only store; atomic writes, resume on restart |
 | `epm_nodes.py` | MAST-U node map, DIII-D feature -> EPM path |
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite, 12 modules; runs without Freya |
+| `tests/` | Offline test suite, 13 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two

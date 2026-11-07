@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 MODULES = ["test_flattop", "test_trigger", "test_coherence",
            "test_checkpoint", "test_lfhf", "test_timebase",
            "test_merge", "test_harmonics", "test_provenance", "test_features", "test_hazard",
-           "test_predict"]
+           "test_predict", "test_ane"]
 
 
 def main():
