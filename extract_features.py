@@ -277,9 +277,9 @@ def derive(rec):
         ne_i = np.interp(rec["time"], tne, ne, left=np.nan, right=np.nan)
         chord = rec["chord"]
         with np.errstate(invalid="ignore", divide="ignore"):
-            n_bar = 1.0e-20 * ne_i / chord                   # 1e20 m^-3
+            n_bar = 1.0e-20 * ne_i #/ chord                   # 1e20 m^-3
             ngw = np.abs(rec["ip"] / 1.0e6) / (np.pi * a ** 2)
-            rec["nhat"] = n_bar / ngw
+            rec["nhat"] = n_bar #/ ngw
 
     # Shaping.  SEPARATRIXGEOMETRY carries (time,) scalars for the
     # triangularities and is preferred; there is no scalar ELONGATION, so
