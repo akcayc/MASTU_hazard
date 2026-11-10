@@ -241,11 +241,11 @@ def main():
             ax1.annotate(lab, (x, yd), xytext=(11, 0), textcoords="offset points",
                          color=INK2, fontsize=fs["direct"], va="center",
                          annotation_clip=False)
-    ax1.set_ylabel("events  (shots with a crossing)", color=INK2,
+    ax1.set_ylabel("event counts  ", color=INK2,
                    fontsize=fs["axis"])
     # "detected", not "tearing-mode": no crossing has yet been checked
     # against a known mode (the truth set)
-    fig.text(0.125, 0.958, "Detected events vs threshold amplitude",
+    fig.text(0.125, 0.958, "Poissible events vs threshold amplitude",
              color=INK, fontsize=fs["title"], fontweight="semibold", ha="left")
     series = f" ({', '.join(labels)})" if direct else ""
     fig.text(0.125, 0.922, f"OMAHA ladders{series}, {nshots} MAST-U shots - "
