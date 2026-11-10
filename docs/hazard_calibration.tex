@@ -232,6 +232,55 @@ best $R$ would be slightly larger. Using the inner $R$ is the standard,
 slightly conservative choice. \texttt{max\_rounds} (1000) is only a ceiling;
 \texttt{hazard\_model} warns if it is reached.
 
+\subsection{Terminology, and why $R$ is the only tuned setting}\label{sec:whyR}
+
+\paragraph{One integer, four names.}
+\texttt{rounds} in \texttt{hazard\_model.fit}, \texttt{num\_boost\_round} in
+the xgboost calls, ``iterations'' in the library's own documentation and
+``number of trees'' in the sum above are all the same integer $R$. One round
+adds one tree. (In multiclass boosting a round adds one tree \emph{per class},
+which is why the library counts rounds and not trees; the objective here is
+\texttt{binary:logistic}, a single output, so round and tree coincide.)
+
+\paragraph{Why the refit has to be told $R$.}
+Early stopping needs rows the booster is not fitting. In the refit there are
+none: all of TRAIN is being fitted. The only unused rows are TEST, and
+stopping on TEST is exactly the leak the nested split exists to prevent --- a
+fold stopped on its own TEST rows no longer has a TEST set. So $R$ cannot be
+discovered \emph{during} the refit; it has to be imported, and the inner CV is
+where it comes from. Nor can it be left unsaid: \texttt{xgb.train} has no
+stopping criterion of its own, and its default \texttt{num\_boost\_round} is
+10.
+
+\paragraph{What the inner CV hands over.}
+One integer. The three inner boosters are discarded, so $R$ is the entire
+channel through which Layer 3 reaches the fold's model. It follows that the
+inner validation thirds are \emph{spent}: $R$ was chosen to minimise the loss
+on exactly those rows, so they have been optimised against, and they cannot
+serve as calibration data either. Only TEST is clean.
+
+\paragraph{Why $R$, and not \texttt{max\_depth}.}
+$R$ has a property none of the other settings has: the models are
+\emph{nested}. The 100-tree model is a prefix of the 340-tree model ---
+truncating the sum above is itself a valid model. So one run up the round axis
+records the held-out loss at every candidate value at once, and $R$ is read
+off that single curve. That is what \texttt{xgb.cv} returns: one row per
+round, the loss at that round, cut at the best one, so $R=\texttt{len(cv)}$.
+
+Depth 4 and depth 6 are not prefixes of each other --- they differ from the
+root down --- so comparing five depths costs five fits, and comparing them
+jointly with $\eta$ and \texttt{min\_child\_weight} costs the product. Hence
+the division of labour in \texttt{hazard\_model}: $R$ is searched in every
+fold, while \texttt{max\_depth}, $\eta$, $\lambda$ and
+\texttt{min\_child\_weight} are fixed at DIII-D's values (next subsection) and
+exposed only as command-line flags. If they ever were tuned, the inner CV is
+where it would have to happen. A sweep judged on TEST scores would destroy the
+property that makes \texttt{oof} honest.
+
+\paragraph{The cost.} Four boosters per outer fold: three inner, then the
+refit. With $K=8$ that is 32 grown and 8 kept per repeat, and at DIII-D's
+$B=15$ repeats, 480 grown and 120 kept.
+
 \subsection{The booster settings, and what they mean here}
 
 \begin{center}\small
@@ -419,6 +468,22 @@ so no two rows share exactly the same $p$, and each row's outcome is just 0 or
 1. A single row with $p=0.03$ and $y=0$ tells us almost nothing. So rows with
 \emph{similar} $p$ are pooled, and their average prediction is compared with
 the fraction that had onset. That pooling is all the ``binning'' is.
+
+\paragraph{The two inputs, and where they come from.}
+Every row needs two numbers: the model's prediction and the outcome. Both are
+already in the results pickle; neither needs a further run.
+\begin{itemize}
+\item The prediction is \texttt{oof} (\S\ref{sec:oof}): one value per row, from
+  the one fold model that never saw that row's shot. It is not a slice of the
+  table held back --- \emph{every} row has an entry, stitched together from the
+  $K$ disjoint folds --- so there is no separate ``test set'' to assemble.
+\item The label is \texttt{Y}, set once by \texttt{make\_annotation} and placed
+  on the last pre-event slice by \texttt{merge\_pair.table\_stack}, before any
+  model existed. There is no test-set annotation step: the labels of the
+  held-out rows were written at the same time as all the others.
+\end{itemize}
+\texttt{hazard\_predict.load} reads exactly this pair, which is why the pooled
+diagnostics need no refit and do not import xgboost.
 
 \paragraph{The recipe} (\texttt{hazard\_predict.calibration}):
 \begin{enumerate}
