@@ -106,7 +106,7 @@ def plot_linear(curves, nshots, out, fs):
     fig.patch.set_facecolor(SURFACE)
     for lv, ev, lab, c in curves:
         m = ev > 0
-        ax.plot(lv[m], ev[m], color=c, lw=3.0, solid_capstyle="round",
+        ax.plot(lv[m], ev[m], color=c, lw=4.2, solid_capstyle="round",
                 label=lab, zorder=3)
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
@@ -197,18 +197,18 @@ def main():
         curves.append((lv, ev, lab, c))
 
         m = ev > 0
-        ax1.plot(lv[m], ev[m], color=c, lw=2.4, solid_capstyle="round", zorder=3)
+        ax1.plot(lv[m], ev[m], color=c, lw=3.6, solid_capstyle="round", zorder=3)
         off = (i * 2) % 6
-        ax1.plot(lv[m][off::6], ev[m][off::6], "o", color=c, ms=5.5, mec=SURFACE,
+        ax1.plot(lv[m][off::6], ev[m][off::6], "o", color=c, ms=7.5, mec=SURFACE,
                  mew=1.3, zorder=4, label=lab)
-        ax2.plot(lv, sl, color=c, lw=2.4, solid_capstyle="round", zorder=3)
+        ax2.plot(lv, sl, color=c, lw=3.6, solid_capstyle="round", zorder=3)
 
         if m.any() and direct:            # deferred: placed after, destaggered
             ends.append([lv[m][-1], ev[m][-1], lab, c])
         if kn is not None:
             al = 0.55 if direct else 0.30
-            ax1.axvline(kn, color=c, lw=1.0, ls=(0, (4, 3)), alpha=al, zorder=1)
-            ax2.axvline(kn, color=c, lw=1.0, ls=(0, (4, 3)), alpha=al, zorder=1)
+            ax1.axvline(kn, color=c, lw=1.8, ls=(0, (4, 3)), alpha=al, zorder=1)
+            ax2.axvline(kn, color=c, lw=1.8, ls=(0, (4, 3)), alpha=al, zorder=1)
 
         base = ev / dwell if dwell else np.full_like(ev, np.nan)
         for j in range(lv.size):
@@ -236,7 +236,7 @@ def main():
         for (x, y, lab, c), yp in zip(ends, ypix):
             yd = inv.transform((0, yp))[1]
             # colored mark carries identity; the text stays in ink
-            ax1.plot([x], [yd], "o", color=c, ms=6.5, mec=SURFACE, mew=1.3,
+            ax1.plot([x], [yd], "o", color=c, ms=8.5, mec=SURFACE, mew=1.3,
                      clip_on=False, zorder=5)
             ax1.annotate(lab, (x, yd), xytext=(11, 0), textcoords="offset points",
                          color=INK2, fontsize=fs["direct"], va="center",
