@@ -31,11 +31,23 @@ What carries over from DIII-D, and what does not:
     rate, calibration-in-the-large (events observed against sum of p), and a
     Hosmer-Lemeshow statistic against its reference distribution.  DIII-D
     scattered the binned rates against a reference curve and read it by eye.
-  * Not ported yet: the screening limits (STANDARD_FIXED_LIMITS are DIII-D
-    values, and an ST needs its own), SHAP, elimination paths.
+  * Screening: tabular_limits.py, the port of DIII-D's, with the same three
+    modes (--limits fixed | auto | none, default fixed) and the same row test,
+    x > min and x <= max.  fixed uses MASTU_FIXED_LIMITS, not DIII-D's
+    tokamak values.  auto takes the 0.05% / 99.95% quantiles of every column,
+    tightened by MASTU_MANUAL_LIMITS.  --set-limit NAME:MIN:MAX overrides on
+    top (not in DIII-D).  As in DIII-D, chisq and error stay in the table so
+    they can be screened, and are never model features; and a failing row is
+    simply dropped -- an event row too, which leaves that shot censored a
+    slice early, so the report counts event rows per limit.
+  * Not ported yet: SHAP, elimination paths.
 
-Rows: EPM alone, those with every feature finite (merge_pair's usable1).  The
-event ledger merge_pair prints says how many events that costs.
+Rows: EPM alone, those with every column finite (merge_pair's usable1,
+DIII-D's complete subset), then those passing the screen.
+
+    python hazard_model.py --features feat_EPM.pickle                  # fixed
+    python hazard_model.py --features feat_EPM.pickle --limits auto
+    python hazard_model.py --features feat_EPM.pickle --set-limit nhat::5
 
 Score: mean test log-likelihood per row against the base-rate model (the
 training base rate applied to every test row), per outer fold.  A model that
@@ -50,6 +62,7 @@ import time
 import numpy as np
 
 import merge_pair as MP
+import tabular_limits as TL
 
 try:
     import xgboost as xgb
@@ -73,30 +86,83 @@ PARAMS = {
 
 EPS = 1e-12
 
+#: reconstruction quality: screened on, never fitted on (DIII-D removes the
+#: same two columns, xgbDescriptorModel.py:844)
+QUALITY = ("chisq", "error")
 
-def load_table(path, exclude=(), features=False):
+
+def choose_limits(mode, X, names, set_limits=None):
+    """The limit set for --limits fixed|auto|none, as DIII-D builds it
+    (xgbDescriptorModel.py:810-818), then --set-limit overrides on top."""
+    if mode == "auto":
+        scr = TL.quantile_limits(X, names)
+        TL.adjust_limits(scr, TL.MASTU_MANUAL_LIMITS)
+    elif mode == "fixed":
+        scr = dict(TL.MASTU_FIXED_LIMITS)
+    elif mode == "none":
+        scr = {}
+    else:
+        raise SystemExit(f"--limits {mode!r}: fixed, auto or none")
+    scr.update(set_limits or {})
+    return scr
+
+
+def print_screening(rep, mode, n_rows, n_ev, n_kept, ev_kept):
+    print(f"  screening, --limits {mode} (row passes when x > min and x <= max):")
+    if not rep:
+        print("    no limits")
+        return
+    for r in rep:
+        if r["rows"] or mode != "auto":
+            print(f"    {r['key']:14s} {r['value']:11.4g}   fails {r['rows']:6d} rows "
+                  f"({100 * r['rows'] / max(n_rows, 1):5.2f}%), {r['events']:3d} "
+                  f"event rows, in {r['shots']} shots")
+    print(f"    kept {n_kept} of {n_rows} rows, {ev_kept} of {n_ev} events")
+
+
+def load_table(path, exclude=(), features=False, limits="none", set_limits=None):
     """X, Y, S (shot), T, feature names and the table dict, EPM rows only.
 
     `path` is a merge_pair output, or with features=True a harvest pickle
-    that is stacked here.
+    that is stacked here.  Rows: usable1 (every column finite, chisq and
+    error included, as DIII-D's complete subset), then screened by the
+    `limits` mode on every column.  A failing row is dropped, as in DIII-D,
+    event rows included.  chisq and error are never model features.  The
+    limits applied and their report are d["limits"] and d["screening"].
     """
     if features:
         d = MP.build_table(path)
     else:
         with open(path, "rb") as fh:
             d = pickle.load(fh)
-    names = [n for n in d["Xnames"] if n not in exclude]
+    allnames = list(d["Xnames"])
     for n in exclude:
-        if n not in d["Xnames"]:
+        if n not in allnames:
             print(f"  note: --exclude {n}: no such feature")
-    cols = [d["Xnames"].index(n) for n in names]
+    missing = [q for q in QUALITY if q not in allnames]
+    if missing:
+        print(f"  note: {missing} not in the table (merge_pair --drop?), so not "
+              f"screenable")
+    names = [n for n in allnames if n not in exclude and n not in QUALITY]
+    cols = [allnames.index(n) for n in names]
     ok = np.asarray(d["usable1"], bool)
-    X = np.asarray(d["X1"], float)[np.ix_(ok, cols)]
+    Xall = np.asarray(d["X1"], float)[ok]
     Y = (np.asarray(d["Y"])[ok] > 0).astype(float)    # rotating or locked
     S = np.asarray(d["ID"])[ok]
     T = np.asarray(d["T"])[ok]
     lost = int((np.asarray(d["Y"]) > 0).sum() - Y.sum())
-    return X, Y, S, T, names, d, lost
+
+    scr = choose_limits(limits, Xall, allnames, set_limits)
+    bad = TL.unknown_keys(scr, allnames)
+    if bad:
+        print(f"  note: limits naming no column, ignored: {bad}")
+    keep = TL.apply_screening(Xall, allnames, scr=scr)
+    d["limits"] = {"mode": limits, "values": scr}
+    d["screening"] = TL.screening_report(Xall, Y, S, allnames, scr)
+    d["screened"] = {"rows": int(Y.size), "events": int(Y.sum()),
+                     "rows_kept": int(keep.sum()), "events_kept": int(Y[keep].sum())}
+    X = Xall[np.ix_(keep, cols)]
+    return X, Y[keep], S[keep], T[keep], names, d, lost
 
 
 def shot_folds(S, K, rng):
@@ -219,6 +285,13 @@ def main():
                    help="outer K-fold repeats with fresh shot splits (DIII-D: 15)")
     p.add_argument("--max-rounds", type=int, default=1000)
     p.add_argument("--exclude", nargs="*", default=[], help="features to leave out")
+    p.add_argument("--limits", default="fixed", choices=("fixed", "auto", "none"),
+                   help="screening set, as DIII-D: fixed = tabular_limits."
+                        "MASTU_FIXED_LIMITS; auto = 0.05/99.95%% quantiles of "
+                        "every column, tightened by MASTU_MANUAL_LIMITS")
+    p.add_argument("--set-limit", nargs="*", default=[], metavar="NAME:MIN:MAX",
+                   help="override or add limits on top of --limits; an empty "
+                        "bound is left as the set has it")
     p.add_argument("--shuffle-targets", action="store_true",
                    help="control: permute Y over rows; should score at the base")
     p.add_argument("--seed", type=int, default=0)
@@ -235,17 +308,22 @@ def main():
     rng = np.random.default_rng(a.seed)
 
     path = a.features or a.table
-    X, Y, S, T, names, d, lost = load_table(path, a.exclude, bool(a.features))
+    X, Y, S, T, names, d, lost = load_table(
+        path, a.exclude, bool(a.features), a.limits,
+        TL.parse_set_limits(a.set_limit))
     ann = ((d.get("provenance") or {}).get("primary") or {}).get("annotation") or {}
     print(f"  xgboost {xgb.__version__}")
     print(f"  table {path}: tree {d.get('tag1')}"
           + (f", n={ann.get('n')}, threshold {ann.get('threshold')} G" if ann else
              ", annotation unknown (no provenance)"))
     print(f"  {Y.size} rows, {int(Y.sum())} events, {np.unique(S).size} shots, "
-          f"{len(names)} features")
+          f"{len(names)} features, after screening")
     if lost:
         print(f"    {lost} labelled events are on rows with a NaN feature "
               f"and are not in the fit")
+    sc = d["screened"]
+    print_screening(d["screening"], a.limits, sc["rows"], sc["events"],
+                    sc["rows_kept"], sc["events_kept"])
     if a.shuffle_targets:
         Y = rng.permutation(Y)
         print("  CONTROL: targets shuffled over rows")
@@ -262,6 +340,7 @@ def main():
             pickle.dump({"folds": folds, "oof": oof, "Y": Y, "S": S, "T": T,
                          "Xnames": names, "params": params, "args": vars(a),
                          "summary": summ, "provenance": d.get("provenance"),
+                         "limits": d["limits"], "screening": d["screening"],
                          "dt": d.get("dt"), "tag": d.get("tag1"),
                          "table": path, "xgboost": xgb.__version__}, fh,
                         protocol=pickle.HIGHEST_PROTOCOL)

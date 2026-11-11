@@ -43,6 +43,7 @@ recomputation over the database.
 | `extract_parallel.py` | Threaded, resumable driver for the above |
 | `hazard_model.py` | XGBoost discrete-time hazard model on `feat_EPM.pickle` or `merged.pickle`; shot-respecting CV |
 | `hazard_predict.py` | Held-out diagnostics of a fitted model: calibration, aligned hazard, shot separation, per-shot traces |
+| `tabular_limits.py` | Screening limits: the port of DIII-D's, plus `MASTU_FIXED_LIMITS` |
 | `feature_diagnostics.py` | Box plots, log-count histograms and a quantile table of every feature, against DIII-D's limits |
 | `check_ane_thomson.py` | One shot: is ANE/DENSITY a line integral or a line average? Tested against Thomson via the path-length scaling |
 | `checkpoint.py` | Chunked append-only store; atomic writes, resume on restart |
@@ -50,7 +51,7 @@ recomputation over the database.
 | `run-study.sh` | All of the above, end to end, with parameters pinned per folder |
 | `giopath.py` | Locates Giovannozzi's modules and puts them on `sys.path` |
 | `egio/` | Vendored dependency — see `egio/README.md` |
-| `tests/` | Offline test suite, 13 modules; runs without Freya |
+| `tests/` | Offline test suite, 14 modules; runs without Freya |
 | `docs/` | Design document and audit |
 
 `saddle_extras` imports its shared constants from `saddle_analysis`, so the two
@@ -662,6 +663,7 @@ reconstruction quality, for screening only.
 ```bash
 python hazard_model.py --features feat_EPM.pickle --out hazard_EPM.pickle
 python hazard_model.py --features feat_EPM.pickle --shuffle-targets   # control
+python hazard_model.py --features feat_EPM.pickle --limits auto --set-limit nhat::5
 python hazard_model.py --table merged.pickle ...    # after pairing on EPQ
 ```
 
@@ -679,14 +681,25 @@ survival likelihood and p(x) = h(x)·dt.
   outer split with fresh shuffles (DIII-D used 15).
 - **Booster:** `fdp-run-study-xgb.sh`'s settings — depth 6, eta 0.10,
   λ 0.010, min_child_weight 5, hist trees; each has a flag.
-- **Rows:** EPM only, every feature finite (`usable1`). Labelled events on a
+- **Rows:** EPM only, every column finite (`usable1`, chisq and error included), then screened. Labelled events on a
   row with a NaN feature are counted and left out.
 - **Score:** test log-likelihood per row against the base-rate model, per
   fold, plus the gain per event and the fraction of the base-rate loss
   removed. `--shuffle-targets` permutes Y over rows and should score at the
   base.
-- **Not ported:** the screening limits (DIII-D's are tokamak values), so
-  nothing is screened yet.
+- **Screening:** `tabular_limits.py`, the port of DIII-D's, with its three
+  modes: `--limits fixed` (default; `MASTU_FIXED_LIMITS`), `auto` (0.05% /
+  99.95% quantiles of every column, tightened by `MASTU_MANUAL_LIMITS`) and
+  `none`. The row test is DIII-D's, x > min and x ≤ max, and a failing row is
+  dropped, event rows included (the shot is then censored a slice early; the
+  report counts event rows per limit). `--set-limit NAME:MIN:MAX` overrides
+  on top; it is not in DIII-D. As in DIII-D, `chisq` and `error` stay in the
+  table (`merge_pair` no longer drops them) so they can be screened, and are
+  never model features. `MASTU_FIXED_LIMITS` sets only betap, betat and nhat
+  minima of 0; DIII-D's other values are tokamak values, and its q limits
+  assume q > 0, while MAST-U q is signed. The rest is to be chosen from
+  `feature_diagnostics.py`. The limits applied and the per-limit counts are
+  saved in the results pickle.
 
 The results pickle holds every fold, the out-of-fold predictions (each row
 predicted by a model that never saw its shot), gain importances, the
@@ -729,7 +742,7 @@ would remove. chisq and error are included.
 
 Locked-mode detector (no counterpart to the DIII-D M-matrix path — the spectral
 detector cannot see a DC island, and the 1 kHz band floor excludes one by
-construction); screening limits re-derived for an ST; SHAP and
+construction); the values of the screening limits for an ST; SHAP and
 feature-elimination for the hazard model; scoring
 new shots with the stored fold models.
 

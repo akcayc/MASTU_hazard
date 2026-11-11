@@ -238,7 +238,7 @@ def accounting(names, X1, X2, Y, has2, usable1, matched, verbose=True):
     return out
 
 
-def build_table(primary, secondary=None, drop=("error", "chisq"),
+def build_table(primary, secondary=None, drop=(),
                 delta=None, event_delta=None):
     """The survival table from one or two feature pickles, as a dict.
 
@@ -296,9 +296,10 @@ def main():
                    help="matching window [s]; default dt/4 from the data")
     p.add_argument("--event-delta", type=float, default=None,
                    help="label tolerance [s]; default 2*dt from the data")
-    p.add_argument("--drop", nargs="*", default=["error", "chisq"],
-                   help="columns to exclude from the model features; these are "
-                        "reconstruction quality, kept for screening only")
+    p.add_argument("--drop", nargs="*", default=[],
+                   help="columns to leave out of the table.  chisq and error "
+                        "are kept by default: hazard_model screens on them and "
+                        "never fits on them")
     a = p.parse_args()
 
     data = build_table(a.primary, a.secondary, a.drop, a.delta, a.event_delta)

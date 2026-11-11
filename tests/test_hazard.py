@@ -79,6 +79,39 @@ def main():
           np.array_equal(Xf, X) and np.array_equal(Yf, Y) and np.array_equal(Sf, S)
           and nf == names)
 
+    # screening in load_table: chisq/error kept in the table, screened on,
+    # never fitted on; a failing row is dropped, event rows included (DIII-D)
+    recs_q = []
+    for r_ in recs:
+        r2 = dict(r_)
+        n_ = len(r_["time"])
+        r2["features"] = np.c_[r_["features"], np.full(n_, 10.0), np.full(n_, 1e-4)]
+        r2["feature-names"] = names + ["chisq", "error"]
+        recs_q.append(r2)
+    iev = next(i_ for i_, r_ in enumerate(recs_q) if r_["event"])
+    recs_q[iev]["features"][-1, -2] = 500.0        # an event shot's LAST row: chisq
+    path_q = os.path.join(tempfile.mkdtemp(), "feat_q.pickle")
+    with open(path_q, "wb") as fh:
+        pickle.dump({"records": recs_q, "dropped": {}, "tag": "EPM",
+                     "provenance": None}, fh)
+    Xq, Yq, Sq, _, nq, dq, _ = HM.load_table(path_q, features=True, limits="none",
+                                             set_limits={"chisq_max": 100.0})
+    s0 = recs_q[iev]["shot"]
+    check("chisq/error screened on, not fitted on",
+          "chisq" not in nq and "error" not in nq and nq == names)
+    check("a failing row is dropped, its shot kept (event row too)",
+          Yq.size == Y.size - 1 and (Sq == s0).sum() == (S == s0).sum() - 1
+          and dq["screened"]["events"] - dq["screened"]["events_kept"] == 1
+          and Yq[Sq == s0].sum() == 0)
+    rep = {r_["key"]: r_ for r_ in dq["screening"]}
+    check("report counts the failing row", rep["chisq_max"]["rows"] == 1)
+    _, Ya, _, _, _, da, _ = HM.load_table(path_q, features=True, limits="auto")
+    check("auto: quantile limits on every column, error included",
+          {"x0_min", "x0_max", "error_max"} <= set(da["limits"]["values"])
+          and Ya.size < Y.size)
+    _, Yn, _, _, _, dn, _ = HM.load_table(path_q, features=True, limits="none")
+    check("none: nothing screened", Yn.size == Y.size and not dn["limits"]["values"])
+
     rng = np.random.default_rng(2)
     Ys = rng.permutation(Y)
     folds, _ = HM.evaluate(X, Ys, S, par, 4, 3, 1, 300, rng, verbose=False)

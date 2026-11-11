@@ -27,21 +27,12 @@ import pickle
 import numpy as np
 
 import merge_pair as MP
+import tabular_limits as TL
 
-#: DIII-D's tabular_limits.STANDARD_FIXED_LIMITS, verbatim.  Rows pass when
-#: x > min and x <= max.  Reference lines only.
-DIIID_FIXED_LIMITS = {
-    "chisq_max": 90.0, "error_max": 5.0e-3,
-    "nhat_min": 0.0, "nhat_max": 2.0,
-    "betap_min": 0.0, "betat_min": 0.0,
-    "q0_min": 0.0, "q0_max": 10.0,
-    "q95_min": 1.0, "q95_max": 20.0,
-    "pres0_min": -20.0, "pres0_max": 50.0,
-    "pres50_min": -20.0, "pres50_max": 50.0,
-    "dpres50_min": -50.0, "dpres50_max": 20.0,
-}
-#: DIII-D's SCREEN_AUTO_QUANTILE_LOW / _HIGH
-Q_LO, Q_HI = 0.0005, 0.9995
+#: DIII-D's STANDARD_FIXED_LIMITS (rows pass when x > min and x <= max) and
+#: auto quantiles, from the shared port.  Reference lines only.
+DIIID_FIXED_LIMITS = TL.STANDARD_FIXED_LIMITS
+Q_LO, Q_HI = TL.SCREEN_AUTO_QUANTILE_LOW, TL.SCREEN_AUTO_QUANTILE_HIGH
 
 
 def load(path, table=False):
