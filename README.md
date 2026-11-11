@@ -722,6 +722,12 @@ held-out test and needs no refit. Four figures and a printout:
 - **aligned:** median and IQR of h = −ln(1−p)/dt against time before onset (event
   shots) and before the last slice (censored shots).
 - **separation:** peak h per shot, event vs censored, and the AUC.
+- **alarm:** a threshold at the `--alarm-quantile` (default 0.95) of the
+  censored shots' peak h, dashed on the separation plot. Event shots above it
+  are *caught*, with their lead time (onset − first slice above it); the rest
+  are *missed*. The lowest-peak missed and highest-peak caught shots are
+  printed (`--list N`) with a ready `--shots` line; every shot and its class
+  (caught / missed / false alarm / quiet) goes to `<tag>_shot_peaks.csv`.
 - **shots:** h(t) and S(t) for `--shots`, or `--sample N` random shots of each kind.
 
 `docs/hazard_calibration.tex` explains out-of-fold predictions and the

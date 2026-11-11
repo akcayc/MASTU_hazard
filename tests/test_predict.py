@@ -51,6 +51,34 @@ def main():
     e = al["event"]["median"]
     check("aligned: event hazard highest just before onset",
           np.nanargmax(e) == 0 and np.allclose(al["censored"]["median"], HP.rate(1e-3, dt)))
+
+    # alarm split: 20 flat censored shots, one event shot that rises over its
+    # last 4 slices (caught, lead 4 dt + dt to onset), one flat event shot (missed)
+    dt = 5e-3
+    n = 40
+    pp, YY, SS, TT = [], [], [], []
+    rng = np.random.default_rng(3)
+    for s in range(20):
+        pp.append(rng.uniform(1e-4, 2e-4, n)); YY.append(np.zeros(n))
+        SS.append(np.full(n, s)); TT.append(np.arange(n) * dt)
+    rise = np.full(n, 1.5e-4); rise[-4:] = 1e-2
+    flat = np.full(n, 1.5e-4)
+    for s, v in ((100, rise), (101, flat)):
+        y = np.zeros(n); y[-1] = 1
+        pp.append(v); YY.append(y); SS.append(np.full(n, s)); TT.append(np.arange(n) * dt)
+    pp, YY, SS, TT = map(np.concatenate, (pp, YY, SS, TT))
+    pk = HP.shot_peaks(pp, YY, SS, TT, dt)
+    thr = HP.alarm_split(pk, 0.95)
+    cls = {r["shot"]: r["class"] for r in pk}
+    lead = {r["shot"]: r["lead"] for r in pk}
+    check(f"alarm: rising event caught, flat event missed (thr {thr:.3g}/s)",
+          cls[100] == "caught" and cls[101] == "missed")
+    check(f"alarm: lead = onset - first alarm = 4 dt ({1e3 * lead[100]:.1f} ms)",
+          abs(lead[100] - 4 * dt) < 1e-9)
+    check("alarm: about 5% of censored shots alarm",
+          sum(cls[s] == "false alarm" for s in range(20)) == 1)
+    pe, pc, _ = HP.separation(pk)
+    check("separation from shot_peaks", pe.size == 2 and pc.size == 20)
     return 0 if ok else 1
 
 

@@ -21,6 +21,12 @@ p = 1 - exp(-h dt)), not p/dt, which runs low by about p/2.
   separation    per shot, the peak h: event shots against censored shots, as
                 histograms and the AUC (probability a random event shot peaks
                 higher than a random censored one).
+  alarm         a threshold at the --alarm-quantile of the censored peaks
+                (dashed on the separation plot): event shots above it are
+                CAUGHT, with their lead time (onset - first slice above it),
+                the rest MISSED.  Both are listed; every shot, with its class
+                (caught / missed / false alarm / quiet), goes to
+                <tag>_shot_peaks.csv.
   shots         h(t) and survival S(t) = prod(1 - p) for --shots, or for
                 --sample N random event and N random censored shots.
 
@@ -220,15 +226,94 @@ def auc(pos, neg):
     return (r - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
 
 
-def separation(p, Y, S, dt):
-    peak = {True: [], False: []}
+def shot_peaks(p, Y, S, T, dt):
+    """One record per shot: peak h, when it peaks, and the reference time --
+    onset (last event row + dt, as plot_shots draws it) for event shots, the
+    last slice for censored ones."""
+    out = []
     for s, ix in shot_index(S).items():
-        peak[bool(Y[ix].any())].append(rate(p[ix], dt).max())
-    pe, pc = np.array(peak[True]), np.array(peak[False])
+        h, t = rate(p[ix], dt), T[ix]
+        ev = bool(Y[ix].any())
+        k = int(np.argmax(h))
+        ref = t[np.flatnonzero(Y[ix])[-1]] + dt if ev else t[-1]
+        out.append({"shot": int(s), "event": ev, "rows": int(ix.size),
+                    "peak_h": float(h[k]), "t_peak": float(t[k]),
+                    "t_ref": float(ref), "h_last": float(h[-1]),
+                    "h": h, "t": t})
+    return out
+
+
+def separation(peaks):
+    pe = np.array([r["peak_h"] for r in peaks if r["event"]])
+    pc = np.array([r["peak_h"] for r in peaks if not r["event"]])
     return pe, pc, auc(pe, pc)
 
 
-def plot_separation(pe, pc, a_uc, path, title):
+def alarm_split(peaks, quantile):
+    """Threshold = the `quantile` of the censored shots' peak h, so a fraction
+    1 - quantile of censored shots would alarm.  Event shots peaking above it
+    are caught, the rest missed.  For each shot, t_alarm is the first slice
+    above the threshold and lead = t_ref - t_alarm."""
+    pc = np.array([r["peak_h"] for r in peaks if not r["event"]])
+    thr = float(np.quantile(pc, quantile)) if pc.size else np.nan
+    for r in peaks:
+        above = np.flatnonzero(r["h"] > thr)
+        r["alarm"] = bool(above.size)
+        r["t_alarm"] = float(r["t"][above[0]]) if above.size else np.nan
+        r["lead"] = r["t_ref"] - r["t_alarm"]
+        r["class"] = (("caught" if r["alarm"] else "missed") if r["event"]
+                      else ("false alarm" if r["alarm"] else "quiet"))
+    return thr
+
+
+def print_alarm(peaks, thr, quantile, n_list):
+    ev = [r for r in peaks if r["event"]]
+    ce = [r for r in peaks if not r["event"]]
+    caught = sorted([r for r in ev if r["alarm"]], key=lambda r: -r["peak_h"])
+    missed = sorted([r for r in ev if not r["alarm"]], key=lambda r: r["peak_h"])
+    fa = sum(r["alarm"] for r in ce)
+    print(f"\n  ALARM at the censored {100 * quantile:g}% peak, h > {thr:.3g}/s:")
+    print(f"    event shots    caught {len(caught)} / {len(ev)} "
+          f"({100 * len(caught) / max(len(ev), 1):.0f}%), missed {len(missed)}")
+    print(f"    censored shots alarming {fa} / {len(ce)} "
+          f"({100 * fa / max(len(ce), 1):.0f}%)")
+    if caught:
+        L = 1e3 * np.array([r["lead"] for r in caught])
+        q = np.percentile(L, [25, 50, 75])
+        print(f"    lead time of caught events (onset - first alarm): median "
+              f"{q[1]:.0f} ms, IQR {q[0]:.0f}-{q[2]:.0f} ms")
+
+    def table(rows, head):
+        print(f"\n  {head}")
+        print(f"    {'shot':>7s} {'rows':>5s} {'peak h':>9s} {'t_peak':>7s} "
+              f"{'onset':>7s} {'peak-onset':>10s} {'h last':>9s} {'lead':>7s}")
+        for r in rows[:n_list]:
+            lead = "--" if np.isnan(r["lead"]) else f"{1e3 * r['lead']:.0f} ms"
+            print(f"    {r['shot']:7d} {r['rows']:5d} {r['peak_h']:9.3g} "
+                  f"{r['t_peak']:7.3f} {r['t_ref']:7.3f} "
+                  f"{1e3 * (r['t_peak'] - r['t_ref']):7.0f} ms {r['h_last']:9.3g} "
+                  f"{lead:>7s}")
+        if len(rows) > n_list:
+            print(f"    ... {len(rows) - n_list} more in the csv")
+        if rows:
+            print("    trace: --shots " + " ".join(str(r["shot"]) for r in rows[:8]))
+
+    table(missed, f"MISSED event shots, lowest peak first ({len(missed)})")
+    table(caught, f"CAUGHT event shots, highest peak first ({len(caught)})")
+
+
+def write_peaks(peaks, path):
+    import csv
+    keys = ["shot", "class", "event", "rows", "peak_h", "t_peak", "t_ref",
+            "h_last", "t_alarm", "lead"]
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(keys)
+        for r in sorted(peaks, key=lambda r: (not r["event"], r["peak_h"])):
+            w.writerow([r[k] for k in keys])
+
+
+def plot_separation(pe, pc, a_uc, path, title, thr=None):
     import matplotlib.pyplot as plt
     fig, a = plt.subplots(figsize=(6, 4))
     v = np.concatenate([pe, pc])
@@ -237,6 +322,8 @@ def plot_separation(pe, pc, a_uc, path, title):
            label=f"censored ({pc.size})")
     a.hist(pe, edges, color="C3", alpha=0.6, density=True,
            label=f"event ({pe.size})")
+    if thr is not None and np.isfinite(thr):
+        a.axvline(thr, color="k", ls="--", lw=1, label=f"alarm {thr:.3g}/s")
     a.set_xscale("log")
     a.set_xlabel("peak h over the shot  [1/s]")
     a.set_ylabel("density")
@@ -299,6 +386,11 @@ def main():
     ap.add_argument("--sample", type=int, default=0,
                     help="also trace N random event and N random censored shots")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--alarm-quantile", type=float, default=0.95,
+                    help="alarm threshold = this quantile of the censored "
+                         "shots' peak h (default 0.95: 5%% of them alarm)")
+    ap.add_argument("--list", type=int, default=15,
+                    help="missed / caught event shots printed (all in the csv)")
     a = ap.parse_args()
 
     import matplotlib
@@ -331,12 +423,18 @@ def main():
         c = al.get("censored", {}).get("median", [np.nan] * al["tau"].size)[k]
         print(f"    {1e3 * al['tau'][k]:7.1f} ms   {e:9.3g} | {c:9.3g}")
 
-    pe, pc, a_uc = separation(p, Y, S, dt)
-    plot_separation(pe, pc, a_uc, out("separation"), title)
+    peaks = shot_peaks(p, Y, S, T, dt)
+    pe, pc, a_uc = separation(peaks)
+    thr = alarm_split(peaks, a.alarm_quantile)
+    plot_separation(pe, pc, a_uc, out("separation"), title, thr)
     print(f"\n  SEPARATION  peak h per shot: AUC {a_uc:.3f}  "
           f"({pe.size} event / {pc.size} censored shots; 0.5 = no separation)")
     print("    note: event shots are cut at onset, censored ones run to the end"
           " of the window, so the shot lengths differ")
+    print_alarm(peaks, thr, a.alarm_quantile, a.list)
+    csv_path = os.path.join(a.outdir, f"{tag}_shot_peaks.csv")
+    write_peaks(peaks, csv_path)
+    print(f"\n  wrote {csv_path}")
 
     shots = list(a.shots)
     if a.sample:
