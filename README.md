@@ -716,6 +716,22 @@ python hazard_predict.py --pooled hazard_EPM.pickle --outdir pred_EPM --sample 3
 Everything is computed from the stored out-of-fold predictions, so it is a
 held-out test and needs no refit. Four figures and a printout:
 
+In short:
+
+- **Calibration:** checks whether the model's predicted risk matches how
+  often onsets actually happen, so you can tell whether its probabilities can
+  be taken at face value.
+- **Aligned:** shows how the predicted risk changes in the run-up to an onset
+  compared with shots that have none, so you can see how early a warning
+  appears.
+- **Separation:** compares each shot's highest predicted risk between shots
+  that do and don't have an onset, i.e. how well the model tells which shots
+  will have one.
+- **Shots:** traces the predicted risk and survival probability through
+  individual discharges, so you can see what the model does shot by shot.
+
+In detail:
+
 - **calibration:** rows in 10 equal-count bins of predicted p; mean p against
   the observed onset fraction, with 68% Wilson intervals; total expected vs
   observed; Hosmer-Lemeshow.
