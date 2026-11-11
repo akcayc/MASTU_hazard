@@ -71,6 +71,7 @@ MASTU_FIXED_LIMITS = {
     "betap_min": 0.0,
     "betat_min": 0.0,
     "nhat_min": 0.0,
+    "nhat_max": 10.0,
 }
 
 #: MAST-U counterpart of SCREEN_MANUAL_LIMITS, used by --limits auto
